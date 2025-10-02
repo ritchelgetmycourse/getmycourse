@@ -29,6 +29,9 @@ export function TranscriptForm() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [generatedReport, setGeneratedReport] = useState<any>(null);
   const [processingStatus, setProcessingStatus] = useState<Record<string, Record<string, { status: 'idle' | 'processing' | 'completed' | 'error'; message?: string }>>>({});
+  const [shouldStop, setShouldStop] = useState(false);
+  const [tokenUsage, setTokenUsage] = useState<Record<string, number>>({});
+  const totalTokens = Object.values(tokenUsage).reduce((a: number, b: number) => a + b, 0);
   const { toast } = useToast();
 
   const form = useForm<z.infer<typeof formSchema>>({
@@ -65,6 +68,8 @@ export function TranscriptForm() {
     setIsGenerating(true);
     setGeneratedReport(null);
     setProcessingStatus({}); // Clear previous processing status
+    setShouldStop(false);
+    setTokenUsage({});
 
     let accumulatedResults: any = {};
 
@@ -116,7 +121,12 @@ export function TranscriptForm() {
             const data = JSON.parse(eventData);
             console.log("SSE Message:", eventType, data);
 
-            if (eventType === "processing") {
+            if (eventType === "token_usage") {
+              setTokenUsage(prev => ({
+                ...prev,
+                [data.section]: (prev[data.section] || 0) + data.tokens
+              }));
+            } else if (eventType === "processing") {
               setProcessingStatus(prev => ({
                 ...prev,
                 [data.unitCode]: {
@@ -249,7 +259,7 @@ export function TranscriptForm() {
       </CardHeader>
       <CardContent>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(onGenerate)} className="space-y-8">
+          <form onSubmit={form.handleSubmit(onGenerate)} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               {/* Student Name and Gender FormFields remain the same */}
                <FormField
@@ -306,7 +316,7 @@ export function TranscriptForm() {
                   <FormControl>
                     <Textarea
                       placeholder="Paste the full student transcript here..."
-                      className="min-h-[420px] resize-y font-body"
+                      className="min-h-[350px] resize-y font-body"
                       {...field}
                     />
                   </FormControl>
@@ -316,21 +326,26 @@ export function TranscriptForm() {
             />
 
             <div className="flex flex-col sm:flex-row justify-end pt-4 gap-4">
-              <Button
-                type="submit"
-                disabled={isGenerating || isDownloading}
-                className="w-full sm:w-auto"
-                size="lg"
-              >
-                {isGenerating ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Generating Report…
-                  </>
-                ) : (
-                  "Generate Report"
-                )}
-              </Button>
+              {isGenerating ? (
+                <Button
+                  type="button"
+                  onClick={() => setShouldStop(true)}
+                  className="w-full sm:w-auto"
+                  size="lg"
+                  variant="destructive"
+                >
+                  Stop Generation
+                </Button>
+              ) : (
+                <Button
+                  type="submit"
+                  disabled={isDownloading}
+                  className="w-full sm:w-auto"
+                  size="lg"
+                >
+                  Generate Report
+                </Button>
+              )}
 
               <Button
                 type="button" // Important: prevents form submission
@@ -361,6 +376,23 @@ export function TranscriptForm() {
             <pre className="bg-gray-50 dark:bg-gray-900 p-4 rounded-md overflow-auto text-sm">
               <code>{JSON.stringify(generatedReport, null, 2)}</code>
             </pre>
+          </div>
+        )}
+
+        {/* Token Usage Display */}
+        {Object.keys(tokenUsage).length > 0 && (
+          <div className="mt-8 p-6 bg-gray-100 dark:bg-gray-800 rounded-lg shadow-inner">
+            <h3 className="font-headline text-xl mb-4">Token Usage</h3>
+            <ul className="space-y-2">
+              {Object.entries(tokenUsage).map(([section, tokens]) => (
+                <li key={section} className="font-body">
+                  {section}: {tokens} tokens
+                </li>
+              ))}
+              <li className="font-body font-semibold">
+                Total: {totalTokens} tokens
+              </li>
+            </ul>
           </div>
         )}
 
