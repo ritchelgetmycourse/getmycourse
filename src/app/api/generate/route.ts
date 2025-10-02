@@ -15,6 +15,12 @@ function createSseResponse(body: ReadableStream<Uint8Array>) {
     });
 }
 
+// Helper to send SSE message with token usage
+function sendSseMessage(controller: TransformStreamDefaultController, event: string, data: any) {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    controller.enqueue(encoder.encode(message));
+}
+
 // --- Configuration ---
 const API_KEY = process.env.GEMINI_API_KEY || ''; 
 const MODEL_NAME = "gemini-2.5-pro"; 
@@ -226,9 +232,19 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                         try {
                             const responseStream = await ai.models.generateContentStream({ model, config, contents });
                             let responseContent = '';
+                            // Get response content from stream
                             for await (const chunk of responseStream) {
                                 responseContent += chunk.text;
                             }
+                            
+                            // Estimate tokens based on text length (rough approximation)
+                            const estimatedTokens = Math.ceil(responseContent.length / 4);
+                            
+                            // Send token usage event
+                            controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({ 
+                                section: `${unitCode}-${mainQuestionKey}`,
+                                tokens: estimatedTokens
+                            })}\n\n`));
 
                             if (!responseContent) {
                                 console.error(`No valid response content from AI for ${unitCode}, Question ${mainQuestionKey}`);
