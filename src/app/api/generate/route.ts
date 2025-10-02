@@ -17,14 +17,14 @@ function createSseResponse(body: ReadableStream<Uint8Array>) {
 
 // Helper to send SSE message with token usage
 function sendSseMessage(controller: TransformStreamDefaultController, event: string, data: any) {
-    const message = `event: ${ event } \ndata: ${ JSON.stringify(data) } \n\n`;
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     controller.enqueue(encoder.encode(message));
 }
 
 // --- Configuration ---
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "gemini-2.5-pro";
-const API_CALL_DELAY_MS = 2000; // 2-second delay between API calls
+const API_CALL_DELAY_MS = 10000; // 2-second delay between API calls
 
 // --- Rate Limiting ---
 let apiCallTimestamps: number[] = [];
@@ -41,7 +41,7 @@ async function readFileContent(filePath: string): Promise<string> {
     try {
         return await fs.readFile(filePath, 'utf-8');
     } catch (error) {
-        console.error(`Error: File not found or could not be read at path: ${ filePath } `, error);
+        console.error(`Error: File not found or could not be read at path: ${filePath}`, error);
         return "";
     }
 }
@@ -71,8 +71,8 @@ function createDynamicJsonSchema(instructions: any): any | null {
 
         // Build properties and required fields for each benchmark criterion
         for (const key of benchmarkKeys) {
-            const perfKey = `performance_observed_${ key } `;
-            const actionKey = `example_action_${ key } `;
+            const perfKey = `performance_observed_${key}`;
+            const actionKey = `example_action_${key}`;
 
             required.push(perfKey, actionKey);
 
@@ -80,26 +80,26 @@ function createDynamicJsonSchema(instructions: any): any | null {
                 type: Type.STRING,
                 description: `Evaluate student's performance for benchmark criterion ${key} based on the transcript.`
             };
-properties[actionKey] = {
-    type: Type.STRING,
-    description: `Provide a direct quote from the transcript as evidence for criterion ${key}.`
-};
+            properties[actionKey] = {
+                type: Type.STRING,
+                description: `Provide a direct quote from the transcript as evidence for criterion ${key}.`
+            };
         }
+        
+        // Add the conclusion to the schema
+        properties['conclusion'] = {
+            type: Type.STRING,
+            description: `Provide a final summary conclusion based on the overall performance in the transcript.`
+        };
+        required.push('conclusion');
 
-// Add the conclusion to the schema
-properties['conclusion'] = {
-    type: Type.STRING,
-    description: `Provide a final summary conclusion based on the overall performance in the transcript.`
-};
-required.push('conclusion');
 
-
-return { type: Type.OBJECT, properties, required };
+        return { type: Type.OBJECT, properties, required };
 
     } catch (e) {
-    console.error(`Error: Could not create dynamic JSON schema: ${e}`);
-    return null;
-}
+        console.error(`Error: Could not create dynamic JSON schema: ${e}`);
+        return null;
+    }
 }
 
 
@@ -235,7 +235,7 @@ ${specificJsonGuideText}
 
 Here is the assessment guide content from the JSON guide:
 --- ASSESSMENT GUIDE CONTENT START ---
-${questionData.assessmentGuideContent}
+${unitData.assessment_guide}
 --- ASSESSMENT GUIDE CONTENT END ---
 
 **Your Task:**
@@ -243,11 +243,11 @@ You must act as the VET Assessor. Your goal is to generate the final, real bench
 
 **Output Instructions:**
 Your response MUST be a single, valid JSON object that strictly adheres to the following JSON Schema. Do NOT include any text, explanations, or markdown formatting outside of the JSON object itself.`;
-
-                        if (questionData.assessmentGuideContent && typeof questionData.assessmentGuideContent === 'string') {
-                            console.log(`INFO: Assessment guide content character count: ${questionData.assessmentGuideContent.length}, estimated tokens: ${Math.ceil(questionData.assessmentGuideContent.length / 4)}`);
+                        
+                        if (unitData.assessment_guide && typeof unitData.assessment_guide === 'string') {
+                            console.log(`INFO: Assessment guide content character count: ${unitData.assessment_guide.length}, estimated tokens: ${Math.ceil(unitData.assessment_guide.length / 4)}`);
                         } else {
-                            console.warn(`WARN: Assessment guide content is missing or not a string for ${unitCode} - ${mainQuestionKey}.`);
+                            console.warn(`WARN: Assessment guide content is missing or not a string for ${unitCode}.`);
                         }
                         console.log(`INFO: Estimated input prompt size: ${finalUserPrompt.length} characters.`);
 
@@ -269,12 +269,12 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                             const now = Date.now();
                             apiCallTimestamps = apiCallTimestamps.filter(ts => now - ts < 60000); // Keep timestamps from the last 60s
                             console.log(`INFO: API calls in the last 60 seconds: ${apiCallTimestamps.length}`);
-
+                            
                             // Optional Delay
                             if (API_CALL_DELAY_MS > 0) {
                                 await new Promise(resolve => setTimeout(resolve, API_CALL_DELAY_MS));
                             }
-
+                            
                             apiCallTimestamps.push(Date.now());
                             const responseStream = await ai.models.generateContentStream({ model, config, contents });
                             let responseContent = '';
@@ -282,12 +282,12 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                             for await (const chunk of responseStream) {
                                 responseContent += chunk.text;
                             }
-
+                            
                             // Estimate tokens based on text length (rough approximation)
                             const estimatedTokens = Math.ceil(responseContent.length / 4);
-
+                            
                             // Send token usage event
-                            controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({
+                            controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({ 
                                 section: `${unitCode}-${mainQuestionKey}`,
                                 tokens: estimatedTokens
                             })}\n\n`));
@@ -323,14 +323,14 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                             allResults[unitCode][mainQuestionKey] = result;
 
                             controller.enqueue(encoder.encode(`event: completed\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, result })}\n\n`));
-
+                            
                             const completionTimestamp = new Date().toISOString();
                             console.log(`INFO: [${completionTimestamp}] - Received response for Unit: ${unitCode}, Question: ${mainQuestionKey}`);
 
 
                         } catch (error: any) {
                             console.error(`Error generating content for ${unitCode}, Question ${mainQuestionKey}:`, error.message);
-
+                            
                             // Check for 429 (Too Many Requests) error
                             if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
                                 controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message, fatal: true })}\n\n`));
