@@ -282,6 +282,7 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                 }
                                 
                                 apiCallTimestamps.push(Date.now());
+                                const estimatedInputTokens = Math.ceil(finalUserPrompt.length / 4);
                                 const responseStream = await ai.models.generateContentStream({ model, config, contents });
                                 let responseContent = '';
                                 // Get response content from stream
@@ -289,13 +290,14 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                     responseContent += chunk.text;
                                 }
                                 
-                                // Estimate tokens based on text length (rough approximation)
-                                const estimatedTokens = Math.ceil(responseContent.length / 4);
+                                // Estimate output tokens based on text length (rough approximation)
+                                const estimatedOutputTokens = Math.ceil(responseContent.length / 4);
                                 
                                 // Send token usage event
                                 controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({ 
                                     section: `${unitCode}-${mainQuestionKey}`,
-                                    tokens: estimatedTokens
+                                    inputTokens: estimatedInputTokens,
+                                    outputTokens: estimatedOutputTokens
                                 })}\n\n`));
 
                                 if (!responseContent) {

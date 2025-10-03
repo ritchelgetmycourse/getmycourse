@@ -30,8 +30,10 @@ export function TranscriptForm() {
   const [generatedReport, setGeneratedReport] = useState<any>(null);
   const [processingStatus, setProcessingStatus] = useState<Record<string, Record<string, { status: 'idle' | 'processing' | 'completed' | 'error'; message?: string }>>>({});
   const [shouldStop, setShouldStop] = useState(false);
-  const [tokenUsage, setTokenUsage] = useState<Record<string, number>>({});
-  const totalTokens = Object.values(tokenUsage).reduce((a: number, b: number) => a + b, 0);
+  const [tokenUsage, setTokenUsage] = useState<Record<string, { inputTokens: number; outputTokens: number }>>({});
+  const totalInputTokens = Object.values(tokenUsage).reduce((sum, { inputTokens }) => sum + inputTokens, 0);
+  const totalOutputTokens = Object.values(tokenUsage).reduce((sum, { outputTokens }) => sum + outputTokens, 0);
+  const totalCombinedTokens = totalInputTokens + totalOutputTokens;
   const { toast } = useToast();
 
   const form = useForm<z.infer<typeof formSchema>>({
@@ -122,10 +124,17 @@ export function TranscriptForm() {
             console.log("SSE Message:", eventType, data);
 
             if (eventType === "token_usage") {
-              setTokenUsage(prev => ({
-                ...prev,
-                [data.section]: (prev[data.section] || 0) + data.tokens
-              }));
+              setTokenUsage(prev => {
+                const currentInput = prev[data.section]?.inputTokens || 0;
+                const currentOutput = prev[data.section]?.outputTokens || 0;
+                return {
+                  ...prev,
+                  [data.section]: {
+                    inputTokens: currentInput + (Number(data.inputTokens) || 0),
+                    outputTokens: currentOutput + (Number(data.outputTokens) || 0),
+                  }
+                };
+              });
             } else if (eventType === "processing") {
               setProcessingStatus(prev => ({
                 ...prev,
@@ -204,8 +213,10 @@ export function TranscriptForm() {
   }
 
   // Step 2: Fill the DOCX with the generated JSON and download it
-  async function onDownload() {
-    if (!generatedReport) {
+  async function onDownload(reportData?: any) { // Accept reportData as a parameter
+    const reportToUse = reportData || generatedReport; // Use parameter if provided, else state
+
+    if (!reportToUse) {
       toast({
         variant: "destructive",
         title: "No Report Data",
@@ -221,7 +232,7 @@ export function TranscriptForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           studentName: form.getValues().studentName,
-          answers: generatedReport, // Use the JSON stored in state
+          answers: reportToUse, // Use the report data from parameter or state
         }),
       });
 
@@ -377,7 +388,7 @@ export function TranscriptForm() {
         {generatedReport && (
           <div className="mt-8 p-6 bg-gray-100 dark:bg-gray-800 rounded-lg shadow-inner">
             <h3 className="font-headline text-xl mb-4">Generated Report (JSON)</h3>
-            <pre className="bg-gray-50 dark:bg-gray-900 p-4 rounded-md overflow-auto text-sm">
+            <pre className="bg-gray-50 max-h-96 dark:bg-gray-900 p-4 rounded-md overflow-auto text-sm">
               <code>{JSON.stringify(generatedReport, null, 2)}</code>
             </pre>
           </div>
@@ -388,13 +399,19 @@ export function TranscriptForm() {
           <div className="mt-8 p-6 bg-gray-100 dark:bg-gray-800 rounded-lg shadow-inner">
             <h3 className="font-headline text-xl mb-4">Token Usage</h3>
             <ul className="space-y-2">
-              {Object.entries(tokenUsage).map(([section, tokens]) => (
+              {Object.entries(tokenUsage).map(([section, { inputTokens, outputTokens }]) => (
                 <li key={section} className="font-body">
-                  {section}: {tokens} tokens
+                  {section}: Input: {inputTokens} tokens, Output: {outputTokens} tokens
                 </li>
               ))}
               <li className="font-body font-semibold">
-                Total: {totalTokens} tokens
+                Total Input Tokens: {totalInputTokens}
+              </li>
+              <li className="font-body font-semibold">
+                Total Output Tokens: {totalOutputTokens}
+              </li>
+              <li className="font-body font-semibold">
+                Total Combined Tokens: {totalCombinedTokens}
               </li>
             </ul>
           </div>
