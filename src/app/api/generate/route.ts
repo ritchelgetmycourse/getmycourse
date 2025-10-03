@@ -23,7 +23,7 @@ function sendSseMessage(controller: TransformStreamDefaultController, event: str
 
 // --- Configuration ---
 const API_KEY = process.env.GEMINI_API_KEY || '';
-const MODEL_NAME = "gemini-2.5-pro";
+const MODEL_NAME = "models/gemini-flash-latest";
 const API_CALL_DELAY_MS = 10000; // 2-second delay between API calls
 
 // --- Rate Limiting ---
@@ -264,81 +264,114 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
 
                         console.log(`Generating response for ${unitCode}, Question ${mainQuestionKey}...`);
 
-                        try {
-                            // --- Rate Limiting Logic ---
-                            const now = Date.now();
-                            apiCallTimestamps = apiCallTimestamps.filter(ts => now - ts < 60000); // Keep timestamps from the last 60s
-                            console.log(`INFO: API calls in the last 60 seconds: ${apiCallTimestamps.length}`);
-                            
-                            // Optional Delay
-                            if (API_CALL_DELAY_MS > 0) {
-                                await new Promise(resolve => setTimeout(resolve, API_CALL_DELAY_MS));
-                            }
-                            
-                            apiCallTimestamps.push(Date.now());
-                            const responseStream = await ai.models.generateContentStream({ model, config, contents });
-                            let responseContent = '';
-                            // Get response content from stream
-                            for await (const chunk of responseStream) {
-                                responseContent += chunk.text;
-                            }
-                            
-                            // Estimate tokens based on text length (rough approximation)
-                            const estimatedTokens = Math.ceil(responseContent.length / 4);
-                            
-                            // Send token usage event
-                            controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({ 
-                                section: `${unitCode}-${mainQuestionKey}`,
-                                tokens: estimatedTokens
-                            })}\n\n`));
+                        const maxRetries = 3;
+                        let attempt = 0;
+                        let success = false;
 
-                            if (!responseContent) {
-                                console.error(`No valid response content from AI for ${unitCode}, Question ${mainQuestionKey}`);
-                                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "No valid response content from AI." })}\n\n`));
-                                continue;
-                            }
+                        while (attempt < maxRetries && !success) {
+                            attempt++;
+                            try {
+                                // --- Rate Limiting Logic ---
+                                const now = Date.now();
+                                apiCallTimestamps = apiCallTimestamps.filter(ts => now - ts < 60000); // Keep timestamps from the last 60s
+                                console.log(`INFO: API calls in the last 60 seconds: ${apiCallTimestamps.length}`);
+                                
+                                // Optional Delay
+                                if (API_CALL_DELAY_MS > 0) {
+                                    await new Promise(resolve => setTimeout(resolve, API_CALL_DELAY_MS));
+                                }
+                                
+                                apiCallTimestamps.push(Date.now());
+                                const responseStream = await ai.models.generateContentStream({ model, config, contents });
+                                let responseContent = '';
+                                // Get response content from stream
+                                for await (const chunk of responseStream) {
+                                    responseContent += chunk.text;
+                                }
+                                
+                                // Estimate tokens based on text length (rough approximation)
+                                const estimatedTokens = Math.ceil(responseContent.length / 4);
+                                
+                                // Send token usage event
+                                controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({ 
+                                    section: `${unitCode}-${mainQuestionKey}`,
+                                    tokens: estimatedTokens
+                                })}\n\n`));
 
-                            const parsedAiJson = JSON.parse(responseContent);
+                                if (!responseContent) {
+                                    console.error(`No valid response content from AI for ${unitCode}, Question ${mainQuestionKey}`);
+                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "No valid response content from AI." })}\n\n`));
+                                    continue;
+                                }
 
-                            const formattedEvaluation: { [key: string]: any } = {};
-                            const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k)));
+                                let parsedAiJson;
+                                try {
+                                    // Find the start and end of the JSON object to handle potential extra text in the stream
+                                    const jsonStart = responseContent.indexOf('{');
+                                    const jsonEnd = responseContent.lastIndexOf('}');
+                                    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                                        const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
+                                        parsedAiJson = JSON.parse(jsonString);
+                                    } else {
+                                        throw new Error("Could not find a valid JSON object in the response.");
+                                    }
+                                } catch (e: any) {
+                                    console.error(`Failed to parse JSON response for ${unitCode}, Question ${mainQuestionKey}. Error: ${e.message}`);
+                                    console.error("--- Raw AI Response ---");
+                                    console.error(responseContent);
+                                    console.error("--- End Raw AI Response ---");
+                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Failed to parse JSON response from AI." })}\n\n`));
+                                    continue;
+                                }
 
-                            for (const key of benchmarkKeys) {
-                                formattedEvaluation[key] = {
-                                    question: instructions[key].question,
-                                    performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
-                                    example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
+                                const formattedEvaluation: { [key: string]: any } = {};
+                                const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k)));
+
+                                for (const key of benchmarkKeys) {
+                                    formattedEvaluation[key] = {
+                                        question: instructions[key].question,
+                                        performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
+                                        example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
+                                    };
+                                }
+
+                                const result = {
+                                    main_question: questionData.question,
+                                    evaluation: formattedEvaluation,
+                                    conclusion: parsedAiJson.conclusion || "No conclusion generated."
                                 };
+
+                                if (!allResults[unitCode]) {
+                                    allResults[unitCode] = {};
+                                }
+                                allResults[unitCode][mainQuestionKey] = result;
+
+                                controller.enqueue(encoder.encode(`event: completed\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, result })}\n\n`));
+                                
+                                const completionTimestamp = new Date().toISOString();
+                                console.log(`INFO: [${completionTimestamp}] - Received response for Unit: ${unitCode}, Question: ${mainQuestionKey}`);
+                                
+                                success = true; // Mark as successful to exit the retry loop
+
+                            } catch (error: any) {
+                                console.error(`Attempt ${attempt}/${maxRetries} failed for ${unitCode}, Question ${mainQuestionKey}:`, error.message);
+                                
+                                // Check for fatal 429 (Too Many Requests) error
+                                if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
+                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message, fatal: true })}\n\n`));
+                                    controller.close();
+                                    return; // Stop processing all further questions and exit
+                                }
+
+                                if (attempt >= maxRetries) {
+                                    console.error(`All retry attempts failed for ${unitCode}, Question ${mainQuestionKey}.`);
+                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: `API call failed after ${maxRetries} attempts: ${error.message}` })}\n\n`));
+                                } else {
+                                    const delay = 1000 * Math.pow(2, attempt); // Exponential backoff: 2s, 4s, 8s
+                                    console.log(`Retrying in ${delay / 1000}s...`);
+                                    await new Promise(resolve => setTimeout(resolve, delay));
+                                }
                             }
-
-                            const result = {
-                                main_question: questionData.question,
-                                evaluation: formattedEvaluation,
-                                conclusion: parsedAiJson.conclusion || "No conclusion generated."
-                            };
-
-                            if (!allResults[unitCode]) {
-                                allResults[unitCode] = {};
-                            }
-                            allResults[unitCode][mainQuestionKey] = result;
-
-                            controller.enqueue(encoder.encode(`event: completed\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, result })}\n\n`));
-                            
-                            const completionTimestamp = new Date().toISOString();
-                            console.log(`INFO: [${completionTimestamp}] - Received response for Unit: ${unitCode}, Question: ${mainQuestionKey}`);
-
-
-                        } catch (error: any) {
-                            console.error(`Error generating content for ${unitCode}, Question ${mainQuestionKey}:`, error.message);
-                            
-                            // Check for 429 (Too Many Requests) error
-                            if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
-                                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message, fatal: true })}\n\n`));
-                                controller.close();
-                                return; // Stop processing all further questions and exit
-                            }
-
-                            controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message })}\n\n`));
                         }
                     }
                 }
