@@ -171,6 +171,10 @@ export function TranscriptForm() {
                 title: "Report Generated Successfully!",
                 description: "You can now review the JSON and download the DOCX file.",
               });
+              // Automatically trigger download after successful generation
+              if (Object.keys(accumulatedResults).length > 0) {
+                await onDownload();
+              }
               break;
             }
           } catch (parseError) {
