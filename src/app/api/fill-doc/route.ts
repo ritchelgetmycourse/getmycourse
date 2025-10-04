@@ -91,9 +91,9 @@ export async function POST(req: NextRequest) {
             );
         }
 
-        const root = process.cwd();
-
-        const templatePath = path.join(root, "templates", "blank_form.docx");
+        // Use /tmp for temporary file storage in serverless environments like Vercel
+        const tempDir = "/tmp";
+        const templatePath = path.join(process.cwd(), "templates", "blank_form.docx");
         const schemaJsonText = await fs.readFile(SCHEMA_PATH, 'utf-8');
         const masterSchema = JSON.parse(schemaJsonText);
 
@@ -132,7 +132,7 @@ export async function POST(req: NextRequest) {
             compression: "DEFLATE",
         });
 
-        const outDir = path.join(root, "output");
+        const outDir = path.join(tempDir, "output");
         if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
         const filename = `${sanitizeFilename(studentName)}_CHC33021.docx`;
