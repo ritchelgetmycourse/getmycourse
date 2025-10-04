@@ -78,14 +78,15 @@ function transformAndFormatAnswers(aiAnswers: Answers, studentName: string, mast
 
 export async function POST(req: NextRequest) {
     try {
-        const { studentName, answers } = (await req.json()) as {
+        const { studentName, gender, answers } = (await req.json()) as {
             studentName?: string;
+            gender?: string; // Add gender to the expected payload
             answers?: Answers;
         };
 
-        if (!studentName || !answers || typeof answers !== "object") {
+        if (!studentName || !gender || !answers || typeof answers !== "object") {
             return NextResponse.json(
-                { ok: false, error: "studentName and answers are required." },
+                { ok: false, error: "studentName, gender, and answers are required." },
                 { status: 400 }
             );
         }

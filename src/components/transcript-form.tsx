@@ -182,7 +182,8 @@ export function TranscriptForm() {
               });
               // Automatically trigger download after successful generation
               if (Object.keys(accumulatedResults).length > 0) {
-                await onDownload();
+                const { studentName, gender } = values; // Get studentName and gender from the form values
+                await onDownload(accumulatedResults, studentName, gender); // Pass accumulatedResults, studentName, and gender
               }
               break;
             }
@@ -213,8 +214,10 @@ export function TranscriptForm() {
   }
 
   // Step 2: Fill the DOCX with the generated JSON and download it
-  async function onDownload(reportData?: any) { // Accept reportData as a parameter
+  async function onDownload(reportData?: any, studentNameFromGenerate?: string, genderFromGenerate?: string) { // Accept reportData, studentName, and gender as parameters
     const reportToUse = reportData || generatedReport; // Use parameter if provided, else state
+    const currentStudentName = studentNameFromGenerate || form.getValues().studentName; // Use parameter if provided, else get from form
+    const currentGender = genderFromGenerate || form.getValues().gender; // Use parameter if provided, else get from form
 
     if (!reportToUse) {
       toast({
@@ -231,7 +234,8 @@ export function TranscriptForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          studentName: form.getValues().studentName,
+          studentName: currentStudentName,
+          gender: currentGender, // Pass gender to the fill-doc API
           answers: reportToUse, // Use the report data from parameter or state
         }),
       });
@@ -423,9 +427,9 @@ export function TranscriptForm() {
             {Object.entries(processingStatus).map(([unitCode, questions]) => (
               <div key={unitCode} className="mb-4">
                 <h4 className="font-semibold text-lg mb-2">{unitCode}</h4>
-                <ul className="space-y-2">
+                <ul className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {Object.entries(questions).map(([questionKey, statusData]) => (
-                    <li key={questionKey} className="flex items-center space-x-2">
+                    <li key={questionKey} className="flex items-center space-x-2 p-2 border rounded-md bg-white dark:bg-gray-700">
                       {statusData.status === 'processing' && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
                       {statusData.status === 'completed' && <CheckCircle className="h-4 w-4 text-green-500" />}
                       {statusData.status === 'error' && <XCircle className="h-4 w-4 text-red-500" />}
