@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
 import fs from 'fs/promises';
 import path from 'path';
+import pLimit from 'p-limit'; // Import p-limit
 
 // Helper for SSE
 const encoder = new TextEncoder();
@@ -24,10 +25,7 @@ function sendSseMessage(controller: TransformStreamDefaultController, event: str
 // --- Configuration ---
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "models/gemini-flash-latest";
-const API_CALL_DELAY_MS = 10000; // 2-second delay between API calls
-
-// --- Rate Limiting ---
-let apiCallTimestamps: number[] = [];
+const CONCURRENCY_LIMIT = 5; // Limit concurrent API calls
 
 // --- File Paths ---
 const SCHEMA_PATH = path.join(process.cwd(), "schema.json");
@@ -174,9 +172,11 @@ Repeat for All Questions:
 Follow this process for every question and corresponding transcript section provided.`;
 
                 const allResults: { [key: string]: any } = {};
+                const limit = pLimit(CONCURRENCY_LIMIT); // Initialize p-limit
 
-                // --- Pre-calculate total number of API calls ---
+                const tasks: Promise<void>[] = [];
                 let totalApiCallCount = 0;
+
                 for (const unitCode of Object.keys(parsedSchemaGuide)) {
                     const unitData = parsedSchemaGuide[unitCode];
                     totalApiCallCount += Object.keys(unitData).filter(key => key !== 'assessment_guide').length;
@@ -184,43 +184,42 @@ Follow this process for every question and corresponding transcript section prov
                 console.log(`INFO: Starting generation process. Total API calls to be made: ${totalApiCallCount}`);
                 let currentApiCall = 0;
 
-
                 for (const unitCode of Object.keys(parsedSchemaGuide)) {
                     const unitData = parsedSchemaGuide[unitCode];
 
                     for (const mainQuestionKey of Object.keys(unitData).filter(key => key !== 'assessment_guide')) {
-                        currentApiCall++;
-                        const timestamp = new Date().toISOString();
-                        console.log(`INFO: [${timestamp}] - Processing Unit: ${unitCode}, Question: ${mainQuestionKey} (Call ${currentApiCall}/${totalApiCallCount})`);
+                        tasks.push(limit(async () => { // Wrap the API call logic in p-limit
+                            currentApiCall++;
+                            const timestamp = new Date().toISOString();
+                            console.log(`INFO: [${timestamp}] - Processing Unit: ${unitCode}, Question: ${mainQuestionKey} (Call ${currentApiCall}/${totalApiCallCount})`);
 
-                        controller.enqueue(encoder.encode(`event: processing\ndata: ${JSON.stringify({ unitCode, mainQuestionKey })}\n\n`));
+                            controller.enqueue(encoder.encode(`event: processing\ndata: ${JSON.stringify({ unitCode, mainQuestionKey })}\n\n`));
 
-                        const questionData = unitData[mainQuestionKey];
-                        const instructions = questionData.rolePlayScenerio?.['instruction for roleplay'];
+                            const questionData = unitData[mainQuestionKey];
+                            const instructions = questionData.rolePlayScenerio?.['instruction for roleplay'];
 
-                        if (!instructions) {
-                            console.warn(`Skipping ${unitCode} - Question ${mainQuestionKey} due to missing instructions.`);
-                            controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Missing instructions." })}\n\n`));
-                            continue;
-                        }
-
-                        const dynamicSchema = createDynamicJsonSchema(instructions);
-                        if (!dynamicSchema) {
-                            console.warn(`Skipping ${unitCode} - Question ${mainQuestionKey} due to schema generation failure.`);
-                            controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Schema generation failed." })}\n\n`));
-                            continue;
-                        }
-
-                        const specificJsonGuide = {
-                            [unitCode]: {
-                                [mainQuestionKey]: questionData
+                            if (!instructions) {
+                                console.warn(`Skipping ${unitCode} - Question ${mainQuestionKey} due to missing instructions.`);
+                                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Missing instructions." })}\n\n`));
+                                return; // Use return instead of continue in async tasks
                             }
-                        };
-                        const specificJsonGuideText = JSON.stringify(specificJsonGuide, null, 2);
-                        console.log(`INFO: Specific JSON guide character count: ${specificJsonGuideText.length}, estimated tokens: ${Math.ceil(specificJsonGuideText.length / 4)}`);
 
+                            const dynamicSchema = createDynamicJsonSchema(instructions);
+                            if (!dynamicSchema) {
+                                console.warn(`Skipping ${unitCode} - Question ${mainQuestionKey} due to schema generation failure.`);
+                                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Schema generation failed." })}\n\n`));
+                                return;
+                            }
 
-                        const finalUserPrompt = `${systemPromptText}
+                            const specificJsonGuide = {
+                                [unitCode]: {
+                                    [mainQuestionKey]: questionData
+                                }
+                            };
+                            const specificJsonGuideText = JSON.stringify(specificJsonGuide, null, 2);
+                            console.log(`INFO: Specific JSON guide character count: ${specificJsonGuideText.length}, estimated tokens: ${Math.ceil(specificJsonGuideText.length / 4)}`);
+
+                            const finalUserPrompt = `${systemPromptText}
 
 
 Here is the student's transcript:
@@ -243,140 +242,128 @@ You must act as the VET Assessor. Your goal is to generate the final, real bench
 
 **Output Instructions:**
 Your response MUST be a single, valid JSON object that strictly adheres to the following JSON Schema. Do NOT include any text, explanations, or markdown formatting outside of the JSON object itself.`;
-                        
-                        if (unitData.assessment_guide && typeof unitData.assessment_guide === 'string') {
-                            console.log(`INFO: Assessment guide content character count: ${unitData.assessment_guide.length}, estimated tokens: ${Math.ceil(unitData.assessment_guide.length / 4)}`);
-                        } else {
-                            console.warn(`WARN: Assessment guide content is missing or not a string for ${unitCode}.`);
-                        }
-                        console.log(`INFO: Estimated input prompt size: ${finalUserPrompt.length} characters.`);
 
-                        const contents = [{
-                            role: 'user',
-                            parts: [{ text: finalUserPrompt }],
-                        }];
+                            if (unitData.assessment_guide && typeof unitData.assessment_guide === 'string') {
+                                console.log(`INFO: Assessment guide content character count: ${unitData.assessment_guide.length}, estimated tokens: ${Math.ceil(unitData.assessment_guide.length / 4)}`);
+                            } else {
+                                console.warn(`WARN: Assessment guide content is missing or not a string for ${unitCode}.`);
+                            }
+                            console.log(`INFO: Estimated input prompt size: ${finalUserPrompt.length} characters.`);
 
-                        const config = {
-                            responseMimeType: 'application/json',
-                            responseSchema: dynamicSchema,
-                            temperature: 0.2,
-                        };
+                            const contents = [{
+                                role: 'user',
+                                parts: [{ text: finalUserPrompt }],
+                            }];
 
-                        console.log(`Generating response for ${unitCode}, Question ${mainQuestionKey}...`);
+                            const config = {
+                                responseMimeType: 'application/json',
+                                responseSchema: dynamicSchema,
+                                temperature: 0.2,
+                            };
 
-                        const maxRetries = 3;
-                        let attempt = 0;
-                        let success = false;
+                            console.log(`Generating response for ${unitCode}, Question ${mainQuestionKey}...`);
 
-                        while (attempt < maxRetries && !success) {
-                            attempt++;
-                            try {
-                                // --- Rate Limiting Logic ---
-                                const now = Date.now();
-                                apiCallTimestamps = apiCallTimestamps.filter(ts => now - ts < 60000); // Keep timestamps from the last 60s
-                                console.log(`INFO: API calls in the last 60 seconds: ${apiCallTimestamps.length}`);
-                                
-                                // Optional Delay
-                                if (API_CALL_DELAY_MS > 0) {
-                                    await new Promise(resolve => setTimeout(resolve, API_CALL_DELAY_MS));
-                                }
-                                
-                                apiCallTimestamps.push(Date.now());
-                                const estimatedInputTokens = Math.ceil(finalUserPrompt.length / 4);
-                                const responseStream = await ai.models.generateContentStream({ model, config, contents });
-                                let responseContent = '';
-                                // Get response content from stream
-                                for await (const chunk of responseStream) {
-                                    responseContent += chunk.text;
-                                }
-                                
-                                // Estimate output tokens based on text length (rough approximation)
-                                const estimatedOutputTokens = Math.ceil(responseContent.length / 4);
-                                
-                                // Send token usage event
-                                controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({ 
-                                    section: `${unitCode}-${mainQuestionKey}`,
-                                    inputTokens: estimatedInputTokens,
-                                    outputTokens: estimatedOutputTokens
-                                })}\n\n`));
+                            const maxRetries = 3;
+                            let attempt = 0;
+                            let success = false;
 
-                                if (!responseContent) {
-                                    console.error(`No valid response content from AI for ${unitCode}, Question ${mainQuestionKey}`);
-                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "No valid response content from AI." })}\n\n`));
-                                    continue;
-                                }
-
-                                let parsedAiJson;
+                            while (attempt < maxRetries && !success) {
+                                attempt++;
                                 try {
-                                    // Find the start and end of the JSON object to handle potential extra text in the stream
-                                    const jsonStart = responseContent.indexOf('{');
-                                    const jsonEnd = responseContent.lastIndexOf('}');
-                                    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-                                        const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
-                                        parsedAiJson = JSON.parse(jsonString);
-                                    } else {
-                                        throw new Error("Could not find a valid JSON object in the response.");
+                                    const estimatedInputTokens = Math.ceil(finalUserPrompt.length / 4);
+                                    const responseStream = await ai.models.generateContentStream({ model, config, contents });
+                                    let responseContent = '';
+                                    for await (const chunk of responseStream) {
+                                        responseContent += chunk.text;
                                     }
-                                } catch (e: any) {
-                                    console.error(`Failed to parse JSON response for ${unitCode}, Question ${mainQuestionKey}. Error: ${e.message}`);
-                                    console.error("--- Raw AI Response ---");
-                                    console.error(responseContent);
-                                    console.error("--- End Raw AI Response ---");
-                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Failed to parse JSON response from AI." })}\n\n`));
-                                    continue;
-                                }
 
-                                const formattedEvaluation: { [key: string]: any } = {};
-                                const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k)));
+                                    const estimatedOutputTokens = Math.ceil(responseContent.length / 4);
 
-                                for (const key of benchmarkKeys) {
-                                    formattedEvaluation[key] = {
-                                        question: instructions[key].question,
-                                        performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
-                                        example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
+                                    controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({
+                                        section: `${unitCode}-${mainQuestionKey}`,
+                                        inputTokens: estimatedInputTokens,
+                                        outputTokens: estimatedOutputTokens
+                                    })}\n\n`));
+
+                                    if (!responseContent) {
+                                        console.error(`No valid response content from AI for ${unitCode}, Question ${mainQuestionKey}`);
+                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "No valid response content from AI." })}\n\n`));
+                                        continue;
+                                    }
+
+                                    let parsedAiJson;
+                                    try {
+                                        const jsonStart = responseContent.indexOf('{');
+                                        const jsonEnd = responseContent.lastIndexOf('}');
+                                        if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                                            const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
+                                            parsedAiJson = JSON.parse(jsonString);
+                                        } else {
+                                            throw new Error("Could not find a valid JSON object in the response.");
+                                        }
+                                    } catch (e: any) {
+                                        console.error(`Failed to parse JSON response for ${unitCode}, Question ${mainQuestionKey}. Error: ${e.message}`);
+                                        console.error("--- Raw AI Response ---");
+                                        console.error(responseContent);
+                                        console.error("--- End Raw AI Response ---");
+                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Failed to parse JSON response from AI." })}\n\n`));
+                                        continue;
+                                    }
+
+                                    const formattedEvaluation: { [key: string]: any } = {};
+                                    const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k)));
+
+                                    for (const key of benchmarkKeys) {
+                                        formattedEvaluation[key] = {
+                                            question: instructions[key].question,
+                                            performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
+                                            example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
+                                        };
+                                    }
+
+                                    const result = {
+                                        main_question: questionData.question,
+                                        evaluation: formattedEvaluation,
+                                        conclusion: parsedAiJson.conclusion || "No conclusion generated."
                                     };
-                                }
 
-                                const result = {
-                                    main_question: questionData.question,
-                                    evaluation: formattedEvaluation,
-                                    conclusion: parsedAiJson.conclusion || "No conclusion generated."
-                                };
+                                    if (!allResults[unitCode]) {
+                                        allResults[unitCode] = {};
+                                    }
+                                    allResults[unitCode][mainQuestionKey] = result;
 
-                                if (!allResults[unitCode]) {
-                                    allResults[unitCode] = {};
-                                }
-                                allResults[unitCode][mainQuestionKey] = result;
+                                    controller.enqueue(encoder.encode(`event: completed\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, result })}\n\n`));
 
-                                controller.enqueue(encoder.encode(`event: completed\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, result })}\n\n`));
-                                
-                                const completionTimestamp = new Date().toISOString();
-                                console.log(`INFO: [${completionTimestamp}] - Received response for Unit: ${unitCode}, Question: ${mainQuestionKey}`);
-                                
-                                success = true; // Mark as successful to exit the retry loop
+                                    const completionTimestamp = new Date().toISOString();
+                                    console.log(`INFO: [${completionTimestamp}] - Received response for Unit: ${unitCode}, Question: ${mainQuestionKey}`);
 
-                            } catch (error: any) {
-                                console.error(`Attempt ${attempt}/${maxRetries} failed for ${unitCode}, Question ${mainQuestionKey}:`, error.message);
-                                
-                                // Check for fatal 429 (Too Many Requests) error
-                                if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
-                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message, fatal: true })}\n\n`));
-                                    controller.close();
-                                    return; // Stop processing all further questions and exit
-                                }
+                                    success = true;
 
-                                if (attempt >= maxRetries) {
-                                    console.error(`All retry attempts failed for ${unitCode}, Question ${mainQuestionKey}.`);
-                                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: `API call failed after ${maxRetries} attempts: ${error.message}` })}\n\n`));
-                                } else {
-                                    const delay = 1000 * Math.pow(2, attempt); // Exponential backoff: 2s, 4s, 8s
-                                    console.log(`Retrying in ${delay / 1000}s...`);
-                                    await new Promise(resolve => setTimeout(resolve, delay));
+                                } catch (error: any) {
+                                    console.error(`Attempt ${attempt}/${maxRetries} failed for ${unitCode}, Question ${mainQuestionKey}:`, error.message);
+
+                                    if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
+                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message, fatal: true })}\n\n`));
+                                        controller.close();
+                                        throw error; // Re-throw to stop further processing for this task
+                                    }
+
+                                    if (attempt >= maxRetries) {
+                                        console.error(`All retry attempts failed for ${unitCode}, Question ${mainQuestionKey}.`);
+                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: `API call failed after ${maxRetries} attempts: ${error.message}` })}\n\n`));
+                                    } else {
+                                        const delay = 1000 * Math.pow(2, attempt);
+                                        console.log(`Retrying in ${delay / 1000}s...`);
+                                        await new Promise(resolve => setTimeout(resolve, delay));
+                                    }
                                 }
                             }
-                        }
+                        }));
                     }
                 }
+
+                await Promise.allSettled(tasks); // Wait for all tasks to complete
+
                 console.log(`INFO: [${new Date().toISOString()}] - Generation process completed.`);
                 controller.enqueue(encoder.encode(`event: done\ndata: ${JSON.stringify(allResults)}\n\n`));
                 controller.close();
