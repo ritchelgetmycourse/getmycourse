@@ -2,9 +2,40 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
 import fs from 'fs/promises';
 import path from 'path';
-import pLimit from 'p-limit'; // Import p-limit
+import pLimit from 'p-limit';
 
-// Helper for SSE
+// ===== In-memory cancellation store (module-scoped) =====
+type GenRecord = { canceled: boolean; controllers: Set<AbortController> };
+const generationStore = new Map<string, GenRecord>();
+
+function getOrCreateGen(id: string): GenRecord {
+    const existing = generationStore.get(id);
+    if (existing) return existing;
+    const rec: GenRecord = { canceled: false, controllers: new Set() };
+    generationStore.set(id, rec);
+    return rec;
+}
+function registerController(id: string, ctrl: AbortController) {
+    const rec = getOrCreateGen(id);
+    rec.controllers.add(ctrl);
+}
+function cancelGeneration(id: string) {
+    const rec = generationStore.get(id);
+    if (!rec) return;
+    rec.canceled = true;
+    for (const c of rec.controllers) {
+        try { c.abort(); } catch { }
+    }
+}
+function isCanceled(id: string) {
+    const rec = generationStore.get(id);
+    return !!rec?.canceled;
+}
+function clearGeneration(id: string) {
+    generationStore.delete(id);
+}
+
+// ===== SSE helpers =====
 const encoder = new TextEncoder();
 function createSseResponse(body: ReadableStream<Uint8Array>) {
     return new NextResponse(body, {
@@ -15,26 +46,21 @@ function createSseResponse(body: ReadableStream<Uint8Array>) {
         },
     });
 }
-
-// Helper to send SSE message with token usage
 function sendSseMessage(controller: TransformStreamDefaultController, event: string, data: any) {
     const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     controller.enqueue(encoder.encode(message));
 }
 
 // --- Configuration ---
+export const runtime = "nodejs";
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "models/gemini-flash-latest";
-const CONCURRENCY_LIMIT = 5; // Limit concurrent API calls
+const CONCURRENCY_LIMIT = 5;
 
 // --- File Paths ---
 const SCHEMA_PATH = path.join(process.cwd(), "schema.json");
 
-/**
- * A helper function to read content from a file.
- * @param filePath The path to the file.
- * @returns The file content as a string.
- */
+// Utils
 async function readFileContent(filePath: string): Promise<string> {
     try {
         return await fs.readFile(filePath, 'utf-8');
@@ -44,11 +70,6 @@ async function readFileContent(filePath: string): Promise<string> {
     }
 }
 
-/**
- * Dynamically creates a JSON response schema for the AI model based on benchmark criteria.
- * @param instructions The specific 'instruction for roleplay' object for a single main question.
- * @returns A JSON schema object for the generative model.
- */
 function createDynamicJsonSchema(instructions: any): any | null {
     const properties: { [key: string]: any } = {};
     const required: string[] = [];
@@ -59,15 +80,12 @@ function createDynamicJsonSchema(instructions: any): any | null {
             return null;
         }
 
-        // Find all keys that are numbers (representing the benchmark criteria)
         const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k))).sort((a, b) => Number(a) - Number(b));
-        
         if (benchmarkKeys.length === 0) {
             console.warn("Warning: No numbered benchmark criteria found in the instructions object.");
             return null;
         }
 
-        // Build properties and required fields for each benchmark criterion
         for (const key of benchmarkKeys) {
             const perfKey = `performance_observed_${key}`;
             const actionKey = `example_action_${key}`;
@@ -83,14 +101,12 @@ function createDynamicJsonSchema(instructions: any): any | null {
                 description: `Provide a direct quote from the transcript as evidence for criterion ${key}.`
             };
         }
-        
-        // Add the conclusion to the schema
+
         properties['conclusion'] = {
             type: Type.STRING,
             description: `Provide a final summary conclusion based on the overall performance in the transcript.`
         };
         required.push('conclusion');
-
 
         return { type: Type.OBJECT, properties, required };
 
@@ -100,24 +116,29 @@ function createDynamicJsonSchema(instructions: any): any | null {
     }
 }
 
-
-/**
- * Main API handler for POST requests.
- */
+// ====== POST: start generation (SSE) ======
 export async function POST(req: NextRequest) {
     if (!API_KEY) {
         return new NextResponse(encoder.encode(JSON.stringify({ error: "Gemini API key not configured." })), { status: 500 });
     }
 
-    const { studentName, transcript, gender } = await req.json();
+    const headerGenId = req.headers.get("x-generation-id") || undefined;
+    const { studentName, transcript, gender, generationId: bodyGenId } = await req.json();
+    const generationId: string = headerGenId || bodyGenId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     if (!transcript) {
         return new NextResponse(encoder.encode(JSON.stringify({ error: "Missing 'transcript' in request body." })), { status: 400 });
     }
 
-    console.log(`INFO: Transcript character count: ${transcript.length}, estimated tokens: ${Math.ceil(transcript.length / 4)}`);
+    // Set up cancel record and auto-cancel if client disconnects
+    getOrCreateGen(generationId);
+    req.signal.addEventListener("abort", () => {
+        cancelGeneration(generationId);
+    });
 
-    const readableStream = new ReadableStream({
+    console.log(`INFO: Transcript length: ${transcript.length} chars. GenID=${generationId}`);
+
+    const readableStream = new ReadableStream<Uint8Array>({
         async start(controller) {
             try {
                 const ai = new GoogleGenAI({ apiKey: API_KEY });
@@ -125,8 +146,9 @@ export async function POST(req: NextRequest) {
 
                 const schemaJsonText = await readFileContent(SCHEMA_PATH);
                 if (!schemaJsonText) {
-                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ message: "schema.json could not be read." })}\n\n`));
+                    sendSseMessage(controller as any, "error", { message: "schema.json could not be read." });
                     controller.close();
+                    clearGeneration(generationId);
                     return;
                 }
 
@@ -172,55 +194,49 @@ Repeat for All Questions:
 Follow this process for every question and corresponding transcript section provided.`;
 
                 const allResults: { [key: string]: any } = {};
-                const limit = pLimit(CONCURRENCY_LIMIT); // Initialize p-limit
+                const limit = pLimit(CONCURRENCY_LIMIT);
+
+                // Build tasks
+                let totalApiCallCount = 0;
+                for (const unitCode of Object.keys(parsedSchemaGuide)) {
+                    const unitData = parsedSchemaGuide[unitCode];
+                    totalApiCallCount += Object.keys(unitData).filter(k => k !== 'assessment_guide').length;
+                }
+                console.log(`INFO: Generation starting. Calls planned: ${totalApiCallCount}. GenID=${generationId}`);
 
                 const tasks: Promise<void>[] = [];
-                let totalApiCallCount = 0;
-
-                for (const unitCode of Object.keys(parsedSchemaGuide)) {
-                    const unitData = parsedSchemaGuide[unitCode];
-                    totalApiCallCount += Object.keys(unitData).filter(key => key !== 'assessment_guide').length;
-                }
-                console.log(`INFO: Starting generation process. Total API calls to be made: ${totalApiCallCount}`);
-                let currentApiCall = 0;
 
                 for (const unitCode of Object.keys(parsedSchemaGuide)) {
                     const unitData = parsedSchemaGuide[unitCode];
 
-                    for (const mainQuestionKey of Object.keys(unitData).filter(key => key !== 'assessment_guide')) {
-                        tasks.push(limit(async () => { // Wrap the API call logic in p-limit
-                            currentApiCall++;
+                    for (const mainQuestionKey of Object.keys(unitData).filter(k => k !== 'assessment_guide')) {
+                        tasks.push(limit(async () => {
+                            if (isCanceled(generationId)) return;
+
                             const timestamp = new Date().toISOString();
-                            console.log(`INFO: [${timestamp}] - Processing Unit: ${unitCode}, Question: ${mainQuestionKey} (Call ${currentApiCall}/${totalApiCallCount})`);
-
-                            controller.enqueue(encoder.encode(`event: processing\ndata: ${JSON.stringify({ unitCode, mainQuestionKey })}\n\n`));
+                            console.log(`INFO: [${timestamp}] Processing ${unitCode}:${mainQuestionKey} GenID=${generationId}`);
+                            sendSseMessage(controller as any, "processing", { unitCode, mainQuestionKey });
 
                             const questionData = unitData[mainQuestionKey];
-                            const instructions = questionData.rolePlayScenerio?.['instruction for roleplay'];
+                            const instructions = questionData?.rolePlayScenerio?.['instruction for roleplay'];
 
                             if (!instructions) {
-                                console.warn(`Skipping ${unitCode} - Question ${mainQuestionKey} due to missing instructions.`);
-                                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Missing instructions." })}\n\n`));
-                                return; // Use return instead of continue in async tasks
+                                console.warn(`Skipping ${unitCode} - ${mainQuestionKey}: missing instructions.`);
+                                sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "Missing instructions." });
+                                return;
                             }
 
                             const dynamicSchema = createDynamicJsonSchema(instructions);
                             if (!dynamicSchema) {
-                                console.warn(`Skipping ${unitCode} - Question ${mainQuestionKey} due to schema generation failure.`);
-                                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Schema generation failed." })}\n\n`));
+                                console.warn(`Skipping ${unitCode} - ${mainQuestionKey}: schema generation failed.`);
+                                sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "Schema generation failed." });
                                 return;
                             }
 
-                            const specificJsonGuide = {
-                                [unitCode]: {
-                                    [mainQuestionKey]: questionData
-                                }
-                            };
+                            const specificJsonGuide = { [unitCode]: { [mainQuestionKey]: questionData } };
                             const specificJsonGuideText = JSON.stringify(specificJsonGuide, null, 2);
-                            console.log(`INFO: Specific JSON guide character count: ${specificJsonGuideText.length}, estimated tokens: ${Math.ceil(specificJsonGuideText.length / 4)}`);
 
                             const finalUserPrompt = `${systemPromptText}
-
 
 Here is the student's transcript:
 --- TRANSCRIPT START ---
@@ -243,144 +259,181 @@ You must act as the VET Assessor. Your goal is to generate the final, real bench
 **Output Instructions:**
 Your response MUST be a single, valid JSON object that strictly adheres to the following JSON Schema. Do NOT include any text, explanations, or markdown formatting outside of the JSON object itself.`;
 
-                            if (unitData.assessment_guide && typeof unitData.assessment_guide === 'string') {
-                                console.log(`INFO: Assessment guide content character count: ${unitData.assessment_guide.length}, estimated tokens: ${Math.ceil(unitData.assessment_guide.length / 4)}`);
-                            } else {
-                                console.warn(`WARN: Assessment guide content is missing or not a string for ${unitCode}.`);
-                            }
-                            console.log(`INFO: Estimated input prompt size: ${finalUserPrompt.length} characters.`);
-
-                            const contents = [{
-                                role: 'user',
-                                parts: [{ text: finalUserPrompt }],
-                            }];
-
+                            const contents = [{ role: 'user', parts: [{ text: finalUserPrompt }] }];
                             const config = {
                                 responseMimeType: 'application/json',
                                 responseSchema: dynamicSchema,
                                 temperature: 0.2,
+                                // Some SDK builds support passing anAbort signal here:
+                                // @ts-ignore
+                                abortSignal: undefined as any,
                             };
 
-                            console.log(`Generating response for ${unitCode}, Question ${mainQuestionKey}...`);
+                            const callAbort = new AbortController();
+                            registerController(generationId, callAbort);
+                            // Best-effort: attach to possible httpOptions AND config.abortSignal
+                            // @ts-ignore
+                            (config as any).abortSignal = callAbort.signal;
 
-                            const maxRetries = 3;
-                            let attempt = 0;
-                            let success = false;
-
-                            while (attempt < maxRetries && !success) {
-                                attempt++;
-                                try {
-                                    const estimatedInputTokens = Math.ceil(finalUserPrompt.length / 4);
-                                    const responseStream = await ai.models.generateContentStream({ model, config, contents });
-                                    let responseContent = '';
-                                    for await (const chunk of responseStream) {
-                                        responseContent += chunk.text;
-                                    }
-
-                                    const estimatedOutputTokens = Math.ceil(responseContent.length / 4);
-
-                                    controller.enqueue(encoder.encode(`event: token_usage\ndata: ${JSON.stringify({
-                                        section: `${unitCode}-${mainQuestionKey}`,
-                                        inputTokens: estimatedInputTokens,
-                                        outputTokens: estimatedOutputTokens
-                                    })}\n\n`));
-
-                                    if (!responseContent) {
-                                        console.error(`No valid response content from AI for ${unitCode}, Question ${mainQuestionKey}`);
-                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "No valid response content from AI." })}\n\n`));
-                                        continue;
-                                    }
-
-                                    let parsedAiJson;
-                                    try {
-                                        const jsonStart = responseContent.indexOf('{');
-                                        const jsonEnd = responseContent.lastIndexOf('}');
-                                        if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-                                            const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
-                                            parsedAiJson = JSON.parse(jsonString);
-                                        } else {
-                                            throw new Error("Could not find a valid JSON object in the response.");
-                                        }
-                                    } catch (e: any) {
-                                        console.error(`Failed to parse JSON response for ${unitCode}, Question ${mainQuestionKey}. Error: ${e.message}`);
-                                        console.error("--- Raw AI Response ---");
-                                        console.error(responseContent);
-                                        console.error("--- End Raw AI Response ---");
-                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: "Failed to parse JSON response from AI." })}\n\n`));
-                                        continue;
-                                    }
-
-                                    const formattedEvaluation: { [key: string]: any } = {};
-                                    const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k)));
-
-                                    for (const key of benchmarkKeys) {
-                                        formattedEvaluation[key] = {
-                                            question: instructions[key].question,
-                                            performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
-                                            example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
-                                        };
-                                    }
-
-                                    const result = {
-                                        main_question: questionData.question,
-                                        evaluation: formattedEvaluation,
-                                        conclusion: parsedAiJson.conclusion || "No conclusion generated."
-                                    };
-
-                                    if (!allResults[unitCode]) {
-                                        allResults[unitCode] = {};
-                                    }
-                                    allResults[unitCode][mainQuestionKey] = result;
-
-                                    controller.enqueue(encoder.encode(`event: completed\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, result })}\n\n`));
-
-                                    const completionTimestamp = new Date().toISOString();
-                                    console.log(`INFO: [${completionTimestamp}] - Received response for Unit: ${unitCode}, Question: ${mainQuestionKey}`);
-
-                                    success = true;
-
-                                } catch (error: any) {
-                                    console.error(`Attempt ${attempt}/${maxRetries} failed for ${unitCode}, Question ${mainQuestionKey}:`, error.message);
-
-                                    if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
-                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: error.message, fatal: true })}\n\n`));
-                                        controller.close();
-                                        throw error; // Re-throw to stop further processing for this task
-                                    }
-
-                                    if (attempt >= maxRetries) {
-                                        console.error(`All retry attempts failed for ${unitCode}, Question ${mainQuestionKey}.`);
-                                        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ unitCode, mainQuestionKey, message: `API call failed after ${maxRetries} attempts: ${error.message}` })}\n\n`));
-                                    } else {
-                                        const delay = 1000 * Math.pow(2, attempt);
-                                        console.log(`Retrying in ${delay / 1000}s...`);
-                                        await new Promise(resolve => setTimeout(resolve, delay));
-                                    }
+                            try {
+                                if (isCanceled(generationId)) {
+                                    callAbort.abort();
+                                    return;
                                 }
+
+                                const aiClient = ai; // alias
+                                // Many SDK versions take optional httpOptions with AbortSignal; keep as best-effort.
+                                const responseStream: any = await aiClient.models.generateContentStream({
+                                    model,
+                                    config,
+                                    contents,
+                                    // @ts-ignore
+                                    httpOptions: { signal: callAbort.signal },
+                                });
+
+                                let responseContent = '';
+
+                                // Some SDKs expose an async iterator directly; others via responseStream.stream
+                                const streamIterable = typeof responseStream?.[Symbol.asyncIterator] === 'function'
+                                    ? responseStream
+                                    : responseStream?.stream ?? responseStream;
+
+                                for await (const chunk of streamIterable) {
+                                    if (isCanceled(generationId)) {
+                                        try { callAbort.abort(); } catch { }
+                                        throw new Error("ClientCanceled");
+                                    }
+                                    const text = (chunk && (chunk.text ?? chunk.data?.toString?.())) || "";
+                                    if (text) responseContent = responseContent + text;
+                                }
+
+                                const estimatedInputTokens = Math.ceil(finalUserPrompt.length / 4);
+                                const estimatedOutputTokens = Math.ceil(responseContent.length / 4);
+                                sendSseMessage(controller as any, "token_usage", {
+                                    section: `${unitCode}-${mainQuestionKey}`,
+                                    inputTokens: estimatedInputTokens,
+                                    outputTokens: estimatedOutputTokens
+                                });
+
+                                if (!responseContent) {
+                                    sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "No valid response content from AI." });
+                                    return;
+                                }
+
+                                let parsedAiJson: any;
+                                try {
+                                    const jsonStart = responseContent.indexOf('{');
+                                    const jsonEnd = responseContent.lastIndexOf('}');
+                                    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+                                        const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
+                                        parsedAiJson = JSON.parse(jsonString);
+                                    } else {
+                                        throw new Error("Could not find a valid JSON object in the response.");
+                                    }
+                                } catch (e: any) {
+                                    console.error(`Failed to parse JSON for ${unitCode}, ${mainQuestionKey}.`, e?.message);
+                                    sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "Failed to parse JSON response from AI." });
+                                    return;
+                                }
+
+                                const formattedEvaluation: { [key: string]: any } = {};
+                                const benchmarkKeys = Object.keys(instructions).filter((k: string) => !isNaN(Number(k)));
+
+                                for (const key of benchmarkKeys) {
+                                    formattedEvaluation[key] = {
+                                        question: instructions[key].question,
+                                        performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
+                                        example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
+                                    };
+                                }
+
+                                const result = {
+                                    main_question: questionData.question,
+                                    evaluation: formattedEvaluation,
+                                    conclusion: parsedAiJson.conclusion || "No conclusion generated."
+                                };
+
+                                if (!allResults[unitCode]) allResults[unitCode] = {};
+                                allResults[unitCode][mainQuestionKey] = result;
+
+                                sendSseMessage(controller as any, "completed", { unitCode, mainQuestionKey, result });
+
+                            } catch (error: any) {
+                                const msg = String(error?.message || "");
+                                if (msg === "ClientCanceled" || isCanceled(generationId)) {
+                                    // Quietly stop this task
+                                    return;
+                                }
+
+                                if (error?.status === 429 || /429/.test(msg)) {
+                                    sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: error.message, fatal: true });
+                                    try { controller.close(); } catch { }
+                                    cancelGeneration(generationId);
+                                    throw error; // bubble up to stop others
+                                }
+
+                                // Non-fatal error on this subtask
+                                sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: `API call failed: ${error?.message || 'Unknown error'}` });
+                            } finally {
+                                // Remove this controller from the store
+                                const rec = generationStore.get(generationId);
+                                if (rec) rec.controllers.delete(callAbort);
                             }
                         }));
                     }
                 }
 
-                await Promise.allSettled(tasks); // Wait for all tasks to complete
+                // Wait for all tasks
+                await Promise.allSettled(tasks);
 
-                console.log(`INFO: [${new Date().toISOString()}] - Generation process completed.`);
-                controller.enqueue(encoder.encode(`event: done\ndata: ${JSON.stringify(allResults)}\n\n`));
-                controller.close();
+                if (isCanceled(generationId)) {
+                    // If canceled, end silently (client aborted/DELETE called)
+                    try { controller.close(); } catch { }
+                    clearGeneration(generationId);
+                    console.log(`INFO: Generation canceled. GenID=${generationId}`);
+                    return;
+                }
+
+                // Otherwise, send final "done"
+                sendSseMessage(controller as any, "done", allResults);
+                try { controller.close(); } catch { }
+                clearGeneration(generationId);
+                console.log(`INFO: Generation completed. GenID=${generationId}`);
 
             } catch (error: any) {
-                console.error("Error in API route:", error.message, error.stack);
-                // Check for 429 (Too Many Requests) error at a higher level if it propagates here
-                if (error.status === 429 || (error.message && error.message.includes('429 Too Many Requests'))) {
-                    controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ message: error.message, fatal: true })}\n\n`));
-                    controller.close();
-                    return; // Stop processing all further questions and exit
+                console.error("Error in API route:", error?.message, error?.stack);
+                if (!isCanceled(generationId)) {
+                    sendSseMessage(controller as any, "error", { message: error?.message || "An unexpected error occurred." });
+                    try { controller.close(); } catch { }
+                } else {
+                    try { controller.close(); } catch { }
                 }
-                controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ message: error.message || "An unexpected error occurred." })}\n\n`));
-                controller.close();
+                clearGeneration(generationId);
             }
         },
     });
 
     return createSseResponse(readableStream);
+}
+
+// ====== DELETE: cancel generation (stop backend work) ======
+export async function DELETE(req: NextRequest) {
+    try {
+        const contentType = req.headers.get("content-type") || "";
+        let body: any = {};
+        if (contentType.includes("application/json")) {
+            body = await req.json().catch(() => ({}));
+        }
+        const headerId = req.headers.get("x-generation-id") || undefined;
+        const id = body?.generationId || headerId;
+
+        if (!id) {
+            return NextResponse.json({ ok: false, error: "generationId is required" }, { status: 400 });
+        }
+
+        cancelGeneration(id);
+        return NextResponse.json({ ok: true, message: "Canceled" });
+    } catch (e: any) {
+        return NextResponse.json({ ok: false, error: e?.message || "Failed to cancel" }, { status: 500 });
+    }
 }

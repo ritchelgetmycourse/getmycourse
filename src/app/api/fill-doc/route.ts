@@ -61,7 +61,7 @@ function transformAndFormatAnswers(aiAnswers: Answers, studentName: string, mast
                     combinedContent += `Performance to Observe: ${performance}\n`;
                     combinedContent += `Example Action: ${action}\n\n`;
                 }
-                
+
                 const conclusion = (aiQuestionData.conclusion || 'N/A').replace(studentNameRegex, studentName);
                 combinedContent += `Conclusion\n${conclusion}`;
 
@@ -80,7 +80,7 @@ export async function POST(req: NextRequest) {
     try {
         const { studentName, gender, answers } = (await req.json()) as {
             studentName?: string;
-            gender?: string; // Add gender to the expected payload
+            gender?: string;
             answers?: Answers;
         };
 
@@ -105,9 +105,9 @@ export async function POST(req: NextRequest) {
         }
 
         const dataForDocx = transformAndFormatAnswers(answers, studentName, masterSchema);
-        
+
         const templateBuf = await fs.readFile(templatePath);
-        
+
         const zip = new PizZip(templateBuf);
 
         const nullGetter = (part: any) => {
@@ -148,7 +148,6 @@ export async function POST(req: NextRequest) {
         });
     } catch (err: any) {
         console.error("Doc Gen Error:", err);
-        // Provide more detailed error logging for docxtemplater
         if (err.properties && err.properties.errors) {
             console.error("Docxtemplater errors:", err.properties.errors);
         }
