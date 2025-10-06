@@ -3,7 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import * as z from "zod";
-import { useState, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Loader2, Download, CheckCircle, XCircle, CircleDashed } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,7 @@ const formSchema = z.object({
 export function TranscriptForm() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [generatedReport, setGeneratedReport] = useState<any>(null);
   const [processingStatus, setProcessingStatus] = useState<Record<string, Record<string, { status: 'idle' | 'processing' | 'completed' | 'error'; message?: string }>>>({});
   const [shouldStop, setShouldStop] = useState(false);
@@ -35,6 +36,10 @@ export function TranscriptForm() {
   const totalOutputTokens = Object.values(tokenUsage).reduce((sum, { outputTokens }) => sum + outputTokens, 0);
   const totalCombinedTokens = totalInputTokens + totalOutputTokens;
   const { toast } = useToast();
+
+  // Refs for cancel support
+  const abortCtrlRef = useRef<AbortController | null>(null);
+  const generationIdRef = useRef<string | null>(null);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
@@ -64,22 +69,44 @@ export function TranscriptForm() {
     URL.revokeObjectURL(url);
   }
 
+  // Cleanup on unmount: abort any in-flight generation
+  useEffect(() => {
+    return () => {
+      try {
+        abortCtrlRef.current?.abort();
+      } catch { }
+    };
+  }, []);
+
   // Step 1: Generate the JSON report from the transcript
   async function onGenerate(values: z.infer<typeof formSchema>) {
-    // TODO: Verify stream handling after server/browser refresh
     setIsGenerating(true);
     setGeneratedReport(null);
-    setProcessingStatus({}); // Clear previous processing status
+    setProcessingStatus({});
     setShouldStop(false);
     setTokenUsage({});
+
+    // Prepare cancel plumbing
+    const generationId =
+      (typeof crypto !== "undefined" && "randomUUID" in crypto)
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
+    generationIdRef.current = generationId;
+
+    const abortCtrl = new AbortController();
+    abortCtrlRef.current = abortCtrl;
 
     let accumulatedResults: any = {};
 
     try {
       const genRes = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Generation-Id": generationId,
+        },
+        signal: abortCtrl.signal,
+        body: JSON.stringify({ ...values, generationId }),
       });
 
       if (!genRes.ok || !genRes.body) {
@@ -93,13 +120,9 @@ export function TranscriptForm() {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
+        if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-
-        console.log("Buffer content:", buffer); // Log buffer content
 
         const events = buffer.split('\n\n');
         buffer = events.pop() || '';
@@ -121,7 +144,6 @@ export function TranscriptForm() {
 
           try {
             const data = JSON.parse(eventData);
-            console.log("SSE Message:", eventType, data);
 
             if (eventType === "token_usage") {
               setTokenUsage(prev => {
@@ -163,15 +185,17 @@ export function TranscriptForm() {
                   [data.mainQuestionKey]: { status: 'error', message: data.message }
                 }
               }));
-              toast({
-                variant: "destructive",
-                title: `Error for ${data.unitCode} - ${data.mainQuestionKey}`,
-                description: data.message, // Use the message from the backend directly
-              });
-              if (data.fatal) {
-                setIsGenerating(false); // Stop loading on fatal error
-                reader.cancel(); // Cancel the reader to stop the stream
-                break; // Exit the loop
+              if (data?.message) {
+                toast({
+                  variant: data?.fatal ? "destructive" : "default",
+                  title: data?.fatal ? "Fatal Error" : "Error",
+                  description: data.message,
+                });
+              }
+              if (data?.fatal) {
+                setIsGenerating(false);
+                try { reader.cancel(); } catch { }
+                break;
               }
             } else if (eventType === "done") {
               setGeneratedReport(accumulatedResults);
@@ -180,41 +204,80 @@ export function TranscriptForm() {
                 title: "Report Generated Successfully!",
                 description: "You can now review the JSON and download the DOCX file.",
               });
-              // Automatically trigger download after successful generation
               if (Object.keys(accumulatedResults).length > 0) {
-                await onDownload();
+                const { studentName, gender } = values;
+                await onDownload(accumulatedResults, studentName, gender);
               }
               break;
             }
-          } catch (parseError) {
-            console.error("Failed to parse SSE data:", parseError, eventData);
+          } catch {
+            // swallow partial frames
           }
         }
       }
-      // After the while loop, ensure final state is set if 'done' event wasn't received or processed
-      if (isGenerating) {
-          setIsGenerating(false);
-          toast({
-              variant: "destructive",
-              title: "Generation Interrupted",
-              description: "The streaming connection ended unexpectedly.",
-          });
-      }
 
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : "An unexpected error occurred.";
-      toast({
-        variant: "destructive",
-        title: "Generation Failed",
-        description: msg,
-      });
+      if (isGenerating) {
+        setIsGenerating(false);
+        toast({
+          variant: "destructive",
+          title: "Generation Interrupted",
+          description: "The streaming connection ended unexpectedly.",
+        });
+      }
+    } catch (error: any) {
+      const aborted = error?.name === "AbortError" || /aborted|abort/i.test(String(error?.message || ""));
+      if (aborted || shouldStop) {
+        // Ensure Processing Status is cleared when a cancellation/abort occurs
+        setProcessingStatus({});
+        toast({
+          title: "Generation Stopped",
+          description: "The request was canceled.",
+        });
+      } else {
+        const msg = error instanceof Error ? error.message : "An unexpected error occurred.";
+        toast({
+          variant: "destructive",
+          title: "Generation Failed",
+          description: msg,
+        });
+      }
+    } finally {
       setIsGenerating(false);
+      setIsStopping(false);
+      abortCtrlRef.current = null;
+      generationIdRef.current = null;
+    }
+  }
+
+  // Stop button handler — clears processing status immediately
+  async function onStop() {
+    setShouldStop(true);
+    setIsStopping(true);
+
+    // Clear LLM Processing Status immediately in UI
+    setProcessingStatus({});
+
+    const id = generationIdRef.current;
+    try {
+      if (id) {
+        await fetch("/api/generate", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generationId: id }),
+        }).catch(() => { });
+      }
+    } finally {
+      try { abortCtrlRef.current?.abort(); } catch { }
+      setIsGenerating(false);
+      setIsStopping(false);
     }
   }
 
   // Step 2: Fill the DOCX with the generated JSON and download it
-  async function onDownload(reportData?: any) { // Accept reportData as a parameter
-    const reportToUse = reportData || generatedReport; // Use parameter if provided, else state
+  async function onDownload(reportData?: any, studentNameFromGenerate?: string, genderFromGenerate?: string) {
+    const reportToUse = reportData || generatedReport;
+    const currentStudentName = studentNameFromGenerate || form.getValues().studentName;
+    const currentGender = genderFromGenerate || form.getValues().gender;
 
     if (!reportToUse) {
       toast({
@@ -231,8 +294,9 @@ export function TranscriptForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          studentName: form.getValues().studentName,
-          answers: reportToUse, // Use the report data from parameter or state
+          studentName: currentStudentName,
+          gender: currentGender,
+          answers: reportToUse,
         }),
       });
 
@@ -276,8 +340,7 @@ export function TranscriptForm() {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onGenerate)} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              {/* Student Name and Gender FormFields remain the same */}
-               <FormField
+              <FormField
                 control={form.control}
                 name="studentName"
                 render={({ field }) => (
@@ -321,7 +384,7 @@ export function TranscriptForm() {
                 )}
               />
             </div>
-            
+
             <FormField
               control={form.control}
               name="transcript"
@@ -344,12 +407,20 @@ export function TranscriptForm() {
               {isGenerating ? (
                 <Button
                   type="button"
-                  onClick={() => setShouldStop(true)}
+                  onClick={onStop}
                   className="w-full sm:w-auto"
                   size="lg"
                   variant="destructive"
+                  disabled={isStopping}
                 >
-                  Stop Generation
+                  {isStopping ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Stopping…
+                    </>
+                  ) : (
+                    "Stop Generation"
+                  )}
                 </Button>
               ) : (
                 <Button
@@ -363,8 +434,8 @@ export function TranscriptForm() {
               )}
 
               <Button
-                type="button" // Important: prevents form submission
-                onClick={onDownload}
+                type="button"
+                onClick={() => onDownload()}
                 disabled={!generatedReport || isGenerating || isDownloading}
                 className="w-full sm:w-auto bg-accent text-accent-foreground hover:bg-accent/90"
                 size="lg"
@@ -423,9 +494,9 @@ export function TranscriptForm() {
             {Object.entries(processingStatus).map(([unitCode, questions]) => (
               <div key={unitCode} className="mb-4">
                 <h4 className="font-semibold text-lg mb-2">{unitCode}</h4>
-                <ul className="space-y-2">
+                <ul className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {Object.entries(questions).map(([questionKey, statusData]) => (
-                    <li key={questionKey} className="flex items-center space-x-2">
+                    <li key={questionKey} className="flex items-center space-x-2 p-2 border rounded-md bg-white dark:bg-gray-700">
                       {statusData.status === 'processing' && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
                       {statusData.status === 'completed' && <CheckCircle className="h-4 w-4 text-green-500" />}
                       {statusData.status === 'error' && <XCircle className="h-4 w-4 text-red-500" />}

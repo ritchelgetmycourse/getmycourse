@@ -61,7 +61,7 @@ function transformAndFormatAnswers(aiAnswers: Answers, studentName: string, mast
                     combinedContent += `Performance to Observe: ${performance}\n`;
                     combinedContent += `Example Action: ${action}\n\n`;
                 }
-                
+
                 const conclusion = (aiQuestionData.conclusion || 'N/A').replace(studentNameRegex, studentName);
                 combinedContent += `Conclusion\n${conclusion}`;
 
@@ -78,21 +78,22 @@ function transformAndFormatAnswers(aiAnswers: Answers, studentName: string, mast
 
 export async function POST(req: NextRequest) {
     try {
-        const { studentName, answers } = (await req.json()) as {
+        const { studentName, gender, answers } = (await req.json()) as {
             studentName?: string;
+            gender?: string;
             answers?: Answers;
         };
 
-        if (!studentName || !answers || typeof answers !== "object") {
+        if (!studentName || !gender || !answers || typeof answers !== "object") {
             return NextResponse.json(
-                { ok: false, error: "studentName and answers are required." },
+                { ok: false, error: "studentName, gender, and answers are required." },
                 { status: 400 }
             );
         }
 
-        const root = process.cwd();
-
-        const templatePath = path.join(root, "templates", "blank_form.docx");
+        // Use /tmp for temporary file storage in serverless environments like Vercel
+        const tempDir = "/tmp";
+        const templatePath = path.join(process.cwd(), "templates", "blank_form.docx");
         const schemaJsonText = await fs.readFile(SCHEMA_PATH, 'utf-8');
         const masterSchema = JSON.parse(schemaJsonText);
 
@@ -104,9 +105,9 @@ export async function POST(req: NextRequest) {
         }
 
         const dataForDocx = transformAndFormatAnswers(answers, studentName, masterSchema);
-        
+
         const templateBuf = await fs.readFile(templatePath);
-        
+
         const zip = new PizZip(templateBuf);
 
         const nullGetter = (part: any) => {
@@ -131,7 +132,7 @@ export async function POST(req: NextRequest) {
             compression: "DEFLATE",
         });
 
-        const outDir = path.join(root, "output");
+        const outDir = path.join(tempDir, "output");
         if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
         const filename = `${sanitizeFilename(studentName)}_CHC33021.docx`;
@@ -147,7 +148,6 @@ export async function POST(req: NextRequest) {
         });
     } catch (err: any) {
         console.error("Doc Gen Error:", err);
-        // Provide more detailed error logging for docxtemplater
         if (err.properties && err.properties.errors) {
             console.error("Docxtemplater errors:", err.properties.errors);
         }
