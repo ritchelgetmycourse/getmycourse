@@ -47,7 +47,7 @@ function createSseResponse(body: ReadableStream<Uint8Array>) {
     });
 }
 function sendSseMessage(controller: TransformStreamDefaultController, event: string, data: any) {
-    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const message = `event: ${ event } \ndata: ${ JSON.stringify(data) } \n\n`;
     controller.enqueue(encoder.encode(message));
 }
 
@@ -65,7 +65,7 @@ async function readFileContent(filePath: string): Promise<string> {
     try {
         return await fs.readFile(filePath, 'utf-8');
     } catch (error) {
-        console.error(`Error: File not found or could not be read at path: ${filePath}`, error);
+        console.error(`Error: File not found or could not be read at path: ${ filePath } `, error);
         return "";
     }
 }
@@ -87,8 +87,8 @@ function createDynamicJsonSchema(instructions: any): any | null {
         }
 
         for (const key of benchmarkKeys) {
-            const perfKey = `performance_observed_${key}`;
-            const actionKey = `example_action_${key}`;
+            const perfKey = `performance_observed_${ key } `;
+            const actionKey = `example_action_${ key } `;
 
             required.push(perfKey, actionKey);
 
@@ -96,24 +96,24 @@ function createDynamicJsonSchema(instructions: any): any | null {
                 type: Type.STRING,
                 description: `Evaluate student's performance for benchmark criterion ${key} based on the transcript.`
             };
-            properties[actionKey] = {
-                type: Type.STRING,
-                description: `Provide a direct quote from the transcript as evidence for criterion ${key}.`
-            };
+properties[actionKey] = {
+    type: Type.STRING,
+    description: `Provide a direct quote from the transcript as evidence for criterion ${key}.`
+};
         }
 
-        properties['conclusion'] = {
-            type: Type.STRING,
-            description: `Provide a final summary conclusion based on the overall performance in the transcript.`
-        };
-        required.push('conclusion');
+properties['conclusion'] = {
+    type: Type.STRING,
+    description: `Provide a final summary conclusion based on the overall performance in the transcript.`
+};
+required.push('conclusion');
 
-        return { type: Type.OBJECT, properties, required };
+return { type: Type.OBJECT, properties, required };
 
     } catch (e) {
-        console.error(`Error: Could not create dynamic JSON schema: ${e}`);
-        return null;
-    }
+    console.error(`Error: Could not create dynamic JSON schema: ${e}`);
+    return null;
+}
 }
 
 // ====== POST: start generation (SSE) ======
@@ -125,6 +125,13 @@ export async function POST(req: NextRequest) {
     const headerGenId = req.headers.get("x-generation-id") || undefined;
     const { studentName, transcript, gender, generationId: bodyGenId } = await req.json();
     const generationId: string = headerGenId || bodyGenId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    const firstName = studentName?.split(' ')[0] || studentName;
+    const pronouns = {
+        subject: gender?.toLowerCase() === 'female' ? 'she' : 'he',
+        object: gender?.toLowerCase() === 'female' ? 'her' : 'him',
+        possessive: gender?.toLowerCase() === 'female' ? 'her' : 'his',
+    };
 
     if (!transcript) {
         return new NextResponse(encoder.encode(JSON.stringify({ error: "Missing 'transcript' in request body." })), { status: 400 });
@@ -173,6 +180,7 @@ Step-by-Step Instructions to Generate Each Benchmark Answer:
 Analyze the Student Transcript:
 Carefully read the entire student transcript for the specific question being assessed.
 Identify and extract the key evidence from the student's responses. Look for specific examples, demonstrated skills, stated knowledge, and any gaps or areas where the response was weak.
+Retain mentions of specific facility names or locations when relevant to the context.
 
 Reference the Assessment Guide:
 Locate the corresponding question in the Assessment Guide to understand the required criteria.
@@ -180,15 +188,15 @@ Pay close attention to the structure, headings (e.g., "Performance to Observe," 
 
 Synthesize and Write the Benchmark Answer:
 Begin writing the new benchmark answer.
-Under headings like "Performance to Observe," describe what the student actually did in the transcript. Synthesize their performance into a professional evaluation. For example: "(student name) effectively demonstrated respect for cultural identity by asking the client about..."
-Under headings like "Example Actions," provide direct examples or close paraphrases from the transcript to justify your evaluation. For instance: Example Action: (student name) stated, "I understand that your faith is important to you, so I ensured the art group is women-only and respects cultural attire." This directly addresses the criterion.
+Under headings like "Performance to Observe," describe what the student actually did in the transcript. Synthesize their performance into a professional evaluation. For example: "${firstName} effectively demonstrated respect for cultural identity by asking the client about..."
+Under headings like "Example Actions," provide direct examples or close paraphrases from the transcript to justify your evaluation. These examples must be detailed and substantial, typically 6-8 lines long, to accurately reflect the discussion. For instance: Example Action: ${firstName} stated, "I understand that your faith is important to you, so I ensured the art group is women-only and respects cultural attire." This directly addresses the criterion.
 Write a concise "Conclusion" that summarizes whether the student's performance in the transcript successfully met the requirements of the unit.
 
 Apply Mandatory Formatting and Placeholders:
 Structure: Your generated answer must follow the structure of the benchmark examples in the Assessment Guide (e.g., numbered points, bold headings, etc.).
-Placeholders:
-Use the placeholder (student name) when referring to the student.
-Use the gender-neutral pronouns (he/She) and (his/her) as needed.
+Tone: The output must be strictly professional and formal. Avoid conversational phrases, such as "The referee confirms..." or any other informal language.
+Student Name: Use the student's first name, "${firstName}", when referring to the student. The full name "${studentName}" should only be used at the start of the document in the designated name section.
+Pronouns: Use the pronouns "${pronouns.subject}/${pronouns.object}/${pronouns.possessive}" as needed for the student.
 
 Repeat for All Questions:
 Follow this process for every question and corresponding transcript section provided.`;
