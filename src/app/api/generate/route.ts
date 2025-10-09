@@ -8,6 +8,32 @@ import pLimit from 'p-limit';
 type GenRecord = { canceled: boolean; controllers: Set<AbortController> };
 const generationStore = new Map<string, GenRecord>();
 
+function replacePlaceholders(obj: any, replacements: { [key: string]: string }): any {
+    if (typeof obj === 'string') {
+        let result = obj;
+        for (const placeholder in replacements) {
+            // Use a RegExp with the 'g' flag to replace all occurrences
+            result = result.replace(new RegExp(placeholder, 'g'), replacements[placeholder]);
+        }
+        return result;
+    }
+
+    if (Array.isArray(obj)) {
+        return obj.map(item => replacePlaceholders(item, replacements));
+    }
+
+    if (typeof obj === 'object' && obj !== null) {
+        const newObj: { [key: string]: any } = {};
+        for (const key in obj) {
+            newObj[key] = replacePlaceholders(obj[key], replacements);
+        }
+        return newObj;
+    }
+
+    return obj; // Return numbers, booleans, null, etc. as is
+}
+
+
 function getOrCreateGen(id: string): GenRecord {
     const existing = generationStore.get(id);
     if (existing) return existing;
@@ -47,7 +73,7 @@ function createSseResponse(body: ReadableStream<Uint8Array>) {
     });
 }
 function sendSseMessage(controller: TransformStreamDefaultController, event: string, data: any) {
-    const message = `event: ${ event } \ndata: ${ JSON.stringify(data) } \n\n`;
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     controller.enqueue(encoder.encode(message));
 }
 
@@ -65,7 +91,7 @@ async function readFileContent(filePath: string): Promise<string> {
     try {
         return await fs.readFile(filePath, 'utf-8');
     } catch (error) {
-        console.error(`Error: File not found or could not be read at path: ${ filePath } `, error);
+        console.error(`Error: File not found or could not be read at path: ${filePath}`, error);
         return "";
     }
 }
@@ -87,8 +113,8 @@ function createDynamicJsonSchema(instructions: any): any | null {
         }
 
         for (const key of benchmarkKeys) {
-            const perfKey = `performance_observed_${ key } `;
-            const actionKey = `example_action_${ key } `;
+            const perfKey = `performance_observed_${key}`;
+            const actionKey = `example_action_${key}`;
 
             required.push(perfKey, actionKey);
 
@@ -96,24 +122,24 @@ function createDynamicJsonSchema(instructions: any): any | null {
                 type: Type.STRING,
                 description: `Evaluate student's performance for benchmark criterion ${key} based on the transcript.`
             };
-properties[actionKey] = {
-    type: Type.STRING,
-    description: `Provide a direct quote from the transcript as evidence for criterion ${key}.`
-};
+            properties[actionKey] = {
+                type: Type.STRING,
+                description: `Provide a direct quote from the transcript as evidence for criterion and it should be around more than  6 lines of content  ${key}.`
+            };
         }
 
-properties['conclusion'] = {
-    type: Type.STRING,
-    description: `Provide a final summary conclusion based on the overall performance in the transcript.`
-};
-required.push('conclusion');
+        properties['conclusion'] = {
+            type: Type.STRING,
+            description: `Provide a final summary conclusion based on the overall performance in the transcript.`
+        };
+        required.push('conclusion');
 
-return { type: Type.OBJECT, properties, required };
+        return { type: Type.OBJECT, properties, required };
 
     } catch (e) {
-    console.error(`Error: Could not create dynamic JSON schema: ${e}`);
-    return null;
-}
+        console.error(`Error: Could not create dynamic JSON schema: ${e}`);
+        return null;
+    }
 }
 
 // ====== POST: start generation (SSE) ======
@@ -125,7 +151,6 @@ export async function POST(req: NextRequest) {
     const headerGenId = req.headers.get("x-generation-id") || undefined;
     const { studentName, transcript, gender, generationId: bodyGenId } = await req.json();
     const generationId: string = headerGenId || bodyGenId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
     const firstName = studentName?.split(' ')[0] || studentName;
     const pronouns = {
         subject: gender?.toLowerCase() === 'female' ? 'she' : 'he',
@@ -133,6 +158,12 @@ export async function POST(req: NextRequest) {
         possessive: gender?.toLowerCase() === 'female' ? 'her' : 'his',
     };
 
+    // ===== NEW: Define the placeholder map for replacement later =====
+    const pronounPlaceholders = {
+        '{PRONOUN_SUBJECT}': pronouns.subject,
+        '{PRONOUN_OBJECT}': pronouns.object,
+        '{PRONOUN_POSSESSIVE}': pronouns.possessive,
+    };
     if (!transcript) {
         return new NextResponse(encoder.encode(JSON.stringify({ error: "Missing 'transcript' in request body." })), { status: 400 });
     }
@@ -177,29 +208,30 @@ Your goal is to act as the official assessor. Based on the evidence presented in
 
 Step-by-Step Instructions to Generate Each Benchmark Answer:
 
-Analyze the Student Transcript:
-Carefully read the entire student transcript for the specific question being assessed.
-Identify and extract the key evidence from the student's responses. Look for specific examples, demonstrated skills, stated knowledge, and any gaps or areas where the response was weak.
-Retain mentions of specific facility names or locations when relevant to the context.
+1.  Analyze the Student Transcript:
+    * Carefully read the entire student transcript for the specific question being assessed.
+    * Identify and extract the key evidence from the student's responses. Look for specific examples, demonstrated skills, stated knowledge, and any gaps or areas where the response was weak.
+    * Retain mentions of specific facility names or locations when relevant to the context.
 
-Reference the Assessment Guide:
-Locate the corresponding question in the Assessment Guide to understand the required criteria.
-Pay close attention to the structure, headings (e.g., "Performance to Observe," "Example Actions"), and the level of detail expected in a benchmark answer. The guide is your template for style and format.
+2.  Reference the Assessment Guide:
+    * Locate the corresponding question in the Assessment Guide to understand the required criteria.
+    * Pay close attention to the structure, headings (e.g., "Performance to Observe," "Example Actions"), and the level of detail expected in a benchmark answer. The guide is your template for style and format.
 
-Synthesize and Write the Benchmark Answer:
-Begin writing the new benchmark answer.
-Under headings like "Performance to Observe," describe what the student actually did in the transcript. Synthesize their performance into a professional evaluation. For example: "${firstName} effectively demonstrated respect for cultural identity by asking the client about..."
-Under headings like "Example Actions," provide direct examples or close paraphrases from the transcript to justify your evaluation. These examples must be detailed and substantial, typically 6-8 lines long, to accurately reflect the discussion. For instance: Example Action: ${firstName} stated, "I understand that your faith is important to you, so I ensured the art group is women-only and respects cultural attire." This directly addresses the criterion.
-Write a concise "Conclusion" that summarizes whether the student's performance in the transcript successfully met the requirements of the unit.
+3.  Synthesize and Write the Benchmark Answer:
+    * Begin writing the new benchmark answer.
+    * Under headings like "Performance to Observe," describe what the student actually did in the transcript. Synthesize their performance into a professional evaluation.
+    * Under headings like "Example Actions," provide direct examples or close paraphrases from the transcript to justify your evaluation. These examples must be detailed and substantial, typically 6-8 lines long, to accurately reflect the discussion.
+    * Write a concise "Conclusion" that summarizes whether the student's performance in the transcript successfully met the requirements of the unit.
 
-Apply Mandatory Formatting and Placeholders:
-Structure: Your generated answer must follow the structure of the benchmark examples in the Assessment Guide (e.g., numbered points, bold headings, etc.).
-Tone: The output must be strictly professional and formal. Avoid conversational phrases, such as "The referee confirms..." or any other informal language.
-Student Name: Use the student's first name, "${firstName}", when referring to the student. The full name "${studentName}" should only be used at the start of the document in the designated name section.
-Pronouns: Use the pronouns "${pronouns.subject}/${pronouns.object}/${pronouns.possessive}" as needed for the student.
-
-Repeat for All Questions:
-Follow this process for every question and corresponding transcript section provided.`;
+4.  Apply Mandatory Formatting and Placeholders:
+    * Structure: Your generated answer must follow the structure of the benchmark examples in the Assessment Guide.
+    * Tone: The output must be strictly professional and formal.
+    * Student Name: Use the student's first name, "${firstName}", when referring to the student.
+    * Pronoun Placeholders (CRITICAL): You MUST use the following exact placeholders instead of actual gender pronouns when referring to the student. Do NOT use "he", "she", "him", or "her".
+        * For subjective case (e.g., __ did something): use {PRONOUN_SUBJECT}
+        * For objective case (e.g., I told __): use {PRONOUN_OBJECT}
+        * For possessive case (e.g., that is __ book): use {PRONOUN_POSSESSIVE}
+    * Example Usage: Instead of writing "He demonstrated respect...", you MUST write "{PRONOUN_SUBJECT} demonstrated respect...". Instead of "The assessor asked her...", you MUST write "The assessor asked {PRONOUN_OBJECT}...".`;
 
                 const allResults: { [key: string]: any } = {};
                 const limit = pLimit(CONCURRENCY_LIMIT);
@@ -269,6 +301,14 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
 
                             const contents = [{ role: 'user', parts: [{ text: finalUserPrompt }] }];
                             const config = {
+                                thinkingConfig: {
+                                thinkingBudget: -1,
+                             },
+                                systemInstruction:[
+                                    {
+                                        text: systemPromptText,
+                                    }
+                                ],
                                 responseMimeType: 'application/json',
                                 responseSchema: dynamicSchema,
                                 temperature: 0.2,
@@ -335,6 +375,9 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                     if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
                                         const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
                                         parsedAiJson = JSON.parse(jsonString);
+                                        parsedAiJson = replacePlaceholders(parsedAiJson, pronounPlaceholders);
+
+
                                     } else {
                                         throw new Error("Could not find a valid JSON object in the response.");
                                     }
