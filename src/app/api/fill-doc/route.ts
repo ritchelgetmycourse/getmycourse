@@ -4,14 +4,14 @@ import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
+import { curricula, Curriculum } from '../../../config/curricula';
+import { transformAndFormatAnswersCHC33021 } from '../../../lib/curriculum-logic/CHC33021';
+import { transformAndFormatAnswersCHC30121 } from '../../../lib/curriculum-logic/CHC30121';
 
 export const runtime = "nodejs"; // Required to use 'fs' in Next.js App Router
 
 // Define a type for the nested answer structure
 type Answers = Record<string, any>;
-
-// Path to your master schema file, which is the source of truth
-const SCHEMA_PATH = path.join(process.cwd(), "schema.json");
 
 /**
  * Sanitizes a string to be used as a valid filename.
@@ -32,79 +32,58 @@ function sanitizeFilename(name: string): string {
  * @param masterSchema The complete schema object read from schema.json.
  * @returns A flat object with keys like 'CHCCCS038_1' guaranteed for every question in the master schema.
  */
-function transformAndFormatAnswers(aiAnswers: Answers, studentName: string, masterSchema: Answers): Record<string, any> {
-    const transformedData: Record<string, any> = {};
-    const studentNameRegex = /\(student name\)/gi;
-    const maxQuestionNumber = 20; // Assuming no more than 20 questions per unit
-
-    // Use the master schema as the source of truth for all unit codes
-    const allUnitCodes = Object.keys(masterSchema);
-
-    for (const unitCode of allUnitCodes) {
-        for (let i = 1; i <= maxQuestionNumber; i++) {
-            const questionKey = String(i);
-            const placeholderKey = `${unitCode}_${questionKey}`;
-            
-            const aiQuestionData = aiAnswers?.[unitCode]?.[questionKey];
-
-            if (aiQuestionData && aiQuestionData.evaluation) {
-                let combinedContent = "";
-                const evaluation = aiQuestionData.evaluation;
-
-                for (const benchmarkKey in evaluation) {
-                    const benchmark = evaluation[benchmarkKey];
-                    const question = benchmark.question || '';
-                    const performance = (benchmark.performance_observed || 'N/A').replace(studentNameRegex, studentName);
-                    const action = (benchmark.example_action || 'N/A').replace(studentNameRegex, studentName);
-
-                    combinedContent += `${benchmarkKey}. ${question}\n\n`; 
-                    combinedContent += `Performance to Observe: ${performance}\n`;
-                    combinedContent += `Example Action: ${action}\n\n`;
-                }
-
-                const conclusion = (aiQuestionData.conclusion || 'N/A').replace(studentNameRegex, studentName);
-                combinedContent += `Conclusion\n${conclusion}`;
-
-                transformedData[placeholderKey] = combinedContent;
-            }
-        }
-    }
-    
-    transformedData["Student_Name"] = studentName;
-
-    return transformedData;
-}
 
 
 export async function POST(req: NextRequest) {
     try {
-        const { studentName, gender, answers } = (await req.json()) as {
+        const { studentName, gender, answers, curriculumId } = (await req.json()) as {
             studentName?: string;
             gender?: string;
             answers?: Answers;
+            curriculumId?: string;
         };
 
-        if (!studentName || !gender || !answers || typeof answers !== "object") {
+        if (!studentName || !gender || !answers || typeof answers !== "object" || !curriculumId) {
             return NextResponse.json(
-                { ok: false, error: "studentName, gender, and answers are required." },
+                { ok: false, error: "studentName, gender, answers, and curriculumId are required." },
+                { status: 400 }
+            );
+        }
+
+        const selectedCurriculum = curricula.find((c: Curriculum) => c.id === curriculumId);
+        if (!selectedCurriculum) {
+            return NextResponse.json(
+                { ok: false, error: `Curriculum with ID ${curriculumId} not found.` },
                 { status: 400 }
             );
         }
 
         // Use /tmp for temporary file storage in serverless environments like Vercel
         const tempDir = "/tmp";
-        const templatePath = path.join(process.cwd(), "templates", "blank_form.docx");
-        const schemaJsonText = await fs.readFile(SCHEMA_PATH, 'utf-8');
+        const templatePath = path.join(process.cwd(), selectedCurriculum.templatePath);
+        const schemaJsonText = await fs.readFile(path.join(process.cwd(), selectedCurriculum.schemaPath), 'utf-8');
         const masterSchema = JSON.parse(schemaJsonText);
 
         if (!existsSync(templatePath)) {
             return NextResponse.json(
-                { ok: false, error: "templates/blank_form.docx not found." },
+                { ok: false, error: `${selectedCurriculum.templatePath} not found.` },
                 { status: 404 }
             );
         }
 
-        const dataForDocx = transformAndFormatAnswers(answers, studentName, masterSchema);
+        let dataForDocx: Record<string, any>;
+        if (selectedCurriculum.id === "CHC33021") {
+            dataForDocx = transformAndFormatAnswersCHC33021(answers, studentName, masterSchema);
+        } else if (selectedCurriculum.id === "CHC30121") {
+            dataForDocx = transformAndFormatAnswersCHC30121(answers, studentName, masterSchema);
+        } else {
+            // Fallback or error for unsupported curriculum types
+            return NextResponse.json(
+                { ok: false, error: `Unsupported curriculum ID for document filling: ${curriculumId}` },
+                { status: 400 }
+            );
+        }
+        console.log(`Data for DOCX template for ${curriculumId}:`, JSON.stringify(dataForDocx, null, 2)); // Log DOCX data
 
         const templateBuf = await fs.readFile(templatePath);
 
@@ -135,7 +114,7 @@ export async function POST(req: NextRequest) {
         const outDir = path.join(tempDir, "output");
         if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
-        const filename = `${sanitizeFilename(studentName)}_CHC33021.docx`;
+        const filename = `${sanitizeFilename(studentName)}_${curriculumId}.docx`;
         const outPath = path.join(outDir, filename);
         await fs.writeFile(outPath, rendered);
 
