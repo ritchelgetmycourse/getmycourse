@@ -3,36 +3,12 @@ import { GoogleGenAI, Type } from '@google/genai';
 import fs from 'fs/promises';
 import path from 'path';
 import pLimit from 'p-limit';
+import { curricula, Curriculum } from '../../../../config/curricula';
+import { createDynamicJsonSchemaCHC30121, systemPromptTextCHC30121 } from '../../../../lib/curriculum-logic/CHC30121';
 
 // ===== In-memory cancellation store (module-scoped) =====
 type GenRecord = { canceled: boolean; controllers: Set<AbortController> };
 const generationStore = new Map<string, GenRecord>();
-
-function replacePlaceholders(obj: any, replacements: { [key: string]: string }): any {
-    if (typeof obj === 'string') {
-        let result = obj;
-        for (const placeholder in replacements) {
-            // Use a RegExp with the 'g' flag to replace all occurrences
-            result = result.replace(new RegExp(placeholder, 'g'), replacements[placeholder]);
-        }
-        return result;
-    }
-
-    if (Array.isArray(obj)) {
-        return obj.map(item => replacePlaceholders(item, replacements));
-    }
-
-    if (typeof obj === 'object' && obj !== null) {
-        const newObj: { [key: string]: any } = {};
-        for (const key in obj) {
-            newObj[key] = replacePlaceholders(obj[key], replacements);
-        }
-        return newObj;
-    }
-
-    return obj; // Return numbers, booleans, null, etc. as is
-}
-
 
 function getOrCreateGen(id: string): GenRecord {
     const existing = generationStore.get(id);
@@ -83,9 +59,6 @@ const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "models/gemini-flash-latest";
 const CONCURRENCY_LIMIT = 5;
 
-// --- File Paths ---
-const SCHEMA_PATH = path.join(process.cwd(), "schema.json");
-
 // Utils
 async function readFileContent(filePath: string): Promise<string> {
     try {
@@ -96,54 +69,10 @@ async function readFileContent(filePath: string): Promise<string> {
     }
 }
 
-function createDynamicJsonSchema(instructions: any): any | null {
-    const properties: { [key: string]: any } = {};
-    const required: string[] = [];
-
-    try {
-        if (!instructions) {
-            console.warn("Warning: 'instructions' object provided to createDynamicJsonSchema is null or undefined.");
-            return null;
-        }
-
-        const benchmarkKeys = Object.keys(instructions).filter(k => !isNaN(Number(k))).sort((a, b) => Number(a) - Number(b));
-        if (benchmarkKeys.length === 0) {
-            console.warn("Warning: No numbered benchmark criteria found in the instructions object.");
-            return null;
-        }
-
-        for (const key of benchmarkKeys) {
-            const perfKey = `performance_observed_${key}`;
-            const actionKey = `example_action_${key}`;
-
-            required.push(perfKey, actionKey);
-
-            properties[perfKey] = {
-                type: Type.STRING,
-                description: `Evaluate student's performance for benchmark criterion ${key} based on the transcript.`
-            };
-            properties[actionKey] = {
-                type: Type.STRING,
-                description: `Provide a direct quote from the transcript as evidence for criterion and it should be around more than  6 lines of content  ${key}.`
-            };
-        }
-
-        properties['conclusion'] = {
-            type: Type.STRING,
-            description: `Provide a final summary conclusion based on the overall performance in the transcript.`
-        };
-        required.push('conclusion');
-
-        return { type: Type.OBJECT, properties, required };
-
-    } catch (e) {
-        console.error(`Error: Could not create dynamic JSON schema: ${e}`);
-        return null;
-    }
-}
-
 // ====== POST: start generation (SSE) ======
 export async function POST(req: NextRequest) {
+    const curriculumId = "CHC30121"; // Hardcode for this specific route
+
     if (!API_KEY) {
         return new NextResponse(encoder.encode(JSON.stringify({ error: "Gemini API key not configured." })), { status: 500 });
     }
@@ -152,18 +81,18 @@ export async function POST(req: NextRequest) {
     const { studentName, transcript, gender, generationId: bodyGenId } = await req.json();
     const generationId: string = headerGenId || bodyGenId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const firstName = studentName?.split(' ')[0] || studentName;
-    const pronouns = {
-        subject: gender?.toLowerCase() === 'female' ? 'she' : 'he',
-        object: gender?.toLowerCase() === 'female' ? 'her' : 'him',
-        possessive: gender?.toLowerCase() === 'female' ? 'her' : 'his',
-    };
+    // const pronouns = {
+    //     subject: gender?.toLowerCase() === 'female' ? 'she' : 'he',
+    //     object: gender?.toLowerCase() === 'female' ? 'her' : 'him',
+    //     possessive: gender?.toLowerCase() === 'female' ? 'her' : 'his',
+    // };
 
-    // ===== NEW: Define the placeholder map for replacement later =====
-    const pronounPlaceholders = {
-        '{PRONOUN_SUBJECT}': pronouns.subject,
-        '{PRONOUN_OBJECT}': pronouns.object,
-        '{PRONOUN_POSSESSIVE}': pronouns.possessive,
-    };
+    // Find the selected curriculum configuration
+    const selectedCurriculum = curricula.find((c: Curriculum) => c.id === curriculumId);
+    if (!selectedCurriculum) {
+        return new NextResponse(encoder.encode(JSON.stringify({ error: `Curriculum with ID ${curriculumId} not found.` })), { status: 400 });
+    }
+
     if (!transcript) {
         return new NextResponse(encoder.encode(JSON.stringify({ error: "Missing 'transcript' in request body." })), { status: 400 });
     }
@@ -182,9 +111,9 @@ export async function POST(req: NextRequest) {
                 const ai = new GoogleGenAI({ apiKey: API_KEY });
                 const model = MODEL_NAME;
 
-                const schemaJsonText = await readFileContent(SCHEMA_PATH);
+                const schemaJsonText = await readFileContent(path.join(process.cwd(), selectedCurriculum.schemaPath));
                 if (!schemaJsonText) {
-                    sendSseMessage(controller as any, "error", { message: "schema.json could not be read." });
+                    sendSseMessage(controller as any, "error", { message: `${selectedCurriculum.schemaPath} could not be read.` });
                     controller.close();
                     clearGeneration(generationId);
                     return;
@@ -192,46 +121,7 @@ export async function POST(req: NextRequest) {
 
                 const parsedSchemaGuide = JSON.parse(schemaJsonText);
 
-                const systemPromptText = `You are a highly experienced and qualified Vocational Education and Training (VET) Assessor specializing in the Australian Community Services sector. Your area of expertise is the CHC33021 Certificate III in Individual Support (Disability) qualification. You are professional, meticulous, and skilled at evaluating a student's verbal responses against formal assessment criteria.
-
-Context:
-
-You will be provided with two key pieces of information:
-
-The Assessment Guide: The "Pre-filled 3. CHC33021 Certificate III in Individual Support (Disability) – Assessment Kit - Section C". This document contains the official role-play scenarios, questions, and crucially, the formatting and structure of a high-quality benchmark answer (e.g., "Performance to Observe," "Example Actions," "Conclusion").
-
-The Student Transcript: A text transcript of a competency conversation between an assessor and a student for a specific question from the Assessment Guide.
-
-Primary Objective:
-
-Your goal is to act as the official assessor. Based on the evidence presented in the Student Transcript, you will write a new, comprehensive Benchmark Answer. This generated answer must evaluate the student's performance and be written in the exact format and professional tone of the examples found in the Assessment Guide.
-
-Step-by-Step Instructions to Generate Each Benchmark Answer:
-
-1.  Analyze the Student Transcript:
-    * Carefully read the entire student transcript for the specific question being assessed.
-    * Identify and extract the key evidence from the student's responses. Look for specific examples, demonstrated skills, stated knowledge, and any gaps or areas where the response was weak.
-    * Retain mentions of specific facility names or locations when relevant to the context.
-
-2.  Reference the Assessment Guide:
-    * Locate the corresponding question in the Assessment Guide to understand the required criteria.
-    * Pay close attention to the structure, headings (e.g., "Performance to Observe," "Example Actions"), and the level of detail expected in a benchmark answer. The guide is your template for style and format.
-
-3.  Synthesize and Write the Benchmark Answer:
-    * Begin writing the new benchmark answer.
-    * Under headings like "Performance to Observe," describe what the student actually did in the transcript. Synthesize their performance into a professional evaluation.
-    * Under headings like "Example Actions," provide direct examples or close paraphrases from the transcript to justify your evaluation. These examples must be detailed and substantial, typically 6-8 lines long, to accurately reflect the discussion.
-    * Write a concise "Conclusion" that summarizes whether the student's performance in the transcript successfully met the requirements of the unit.
-
-4.  Apply Mandatory Formatting and Placeholders:
-    * Structure: Your generated answer must follow the structure of the benchmark examples in the Assessment Guide.
-    * Tone: The output must be strictly professional and formal.
-    * Student Name: Use the student's first name, "${firstName}", when referring to the student.
-    * Pronoun Placeholders (CRITICAL): You MUST use the following exact placeholders instead of actual gender pronouns when referring to the student. Do NOT use "he", "she", "him", or "her".
-        * For subjective case (e.g., __ did something): use {PRONOUN_SUBJECT}
-        * For objective case (e.g., I told __): use {PRONOUN_OBJECT}
-        * For possessive case (e.g., that is __ book): use {PRONOUN_POSSESSIVE}
-    * Example Usage: Instead of writing "He demonstrated respect...", you MUST write "{PRONOUN_SUBJECT} demonstrated respect...". Instead of "The assessor asked her...", you MUST write "The assessor asked {PRONOUN_OBJECT}...".`;
+                const systemPromptText = selectedCurriculum.systemPromptOverride || systemPromptTextCHC30121(firstName);
 
                 const allResults: { [key: string]: any } = {};
                 const limit = pLimit(CONCURRENCY_LIMIT);
@@ -258,17 +148,16 @@ Step-by-Step Instructions to Generate Each Benchmark Answer:
                             sendSseMessage(controller as any, "processing", { unitCode, mainQuestionKey });
 
                             const questionData = unitData[mainQuestionKey];
-                            const instructions = questionData?.rolePlayScenerio?.['instruction for roleplay'];
+                            const benchMarkAns = questionData?.benchMarkAns;
 
-                            if (!instructions) {
-                                console.warn(`Skipping ${unitCode} - ${mainQuestionKey}: missing instructions.`);
-                                sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "Missing instructions." });
+                            if (!benchMarkAns) {
+                                console.warn(`Skipping ${unitCode} - ${mainQuestionKey}: missing benchMarkAns.`);
+                                sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "Missing benchMarkAns." });
                                 return;
                             }
 
-                            const dynamicSchema = createDynamicJsonSchema(instructions);
+                            const dynamicSchema = createDynamicJsonSchemaCHC30121(questionData);
                             if (!dynamicSchema) {
-                                console.warn(`Skipping ${unitCode} - ${mainQuestionKey}: schema generation failed.`);
                                 sendSseMessage(controller as any, "error", { unitCode, mainQuestionKey, message: "Schema generation failed." });
                                 return;
                             }
@@ -288,13 +177,8 @@ Here is the JSON guide for the assessment structure and content:
 ${specificJsonGuideText}
 --- JSON GUIDE END ---
 
-Here is the assessment guide content from the JSON guide:
---- ASSESSMENT GUIDE CONTENT START ---
-${unitData.assessment_guide}
---- ASSESSMENT GUIDE CONTENT END ---
-
 **Your Task:**
-You must act as the VET Assessor. Your goal is to generate the final, real benchmark answer by analyzing the **transcript** and following the structure provided in the **JSON guide** above.
+You must act as the VET Assessor. Your goal is to generate a new, comprehensive answer for the question by analyzing the **transcript** and using the provided **benchMarkAns** as a style guide.
 
 **Output Instructions:**
 Your response MUST be a single, valid JSON object that strictly adheres to the following JSON Schema. Do NOT include any text, explanations, or markdown formatting outside of the JSON object itself.`;
@@ -375,8 +259,8 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                     if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
                                         const jsonString = responseContent.substring(jsonStart, jsonEnd + 1);
                                         parsedAiJson = JSON.parse(jsonString);
-                                        parsedAiJson = replacePlaceholders(parsedAiJson, pronounPlaceholders);
-
+                                        // No placeholder replacement here, AI is instructed to use actual pronouns
+                                        console.log(`AI Generated JSON for ${unitCode}:${mainQuestionKey}:`, JSON.stringify(parsedAiJson, null, 2)); // Log AI output
 
                                     } else {
                                         throw new Error("Could not find a valid JSON object in the response.");
@@ -387,22 +271,12 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                     return;
                                 }
 
-                                const formattedEvaluation: { [key: string]: any } = {};
-                                const benchmarkKeys = Object.keys(instructions).filter((k: string) => !isNaN(Number(k)));
-
-                                for (const key of benchmarkKeys) {
-                                    formattedEvaluation[key] = {
-                                        question: instructions[key].question,
-                                        performance_observed: parsedAiJson[`performance_observed_${key}`] || "No observation generated.",
-                                        example_action: parsedAiJson[`example_action_${key}`] || "No example action found."
-                                    };
-                                }
-
                                 const result = {
                                     main_question: questionData.question,
-                                    evaluation: formattedEvaluation,
-                                    conclusion: parsedAiJson.conclusion || "No conclusion generated."
+                                    generatedAnswer: parsedAiJson.generatedAnswer || "No answer generated."
                                 };
+
+                                console.log('AI Result:', JSON.stringify(result, null, 2));
 
                                 if (!allResults[unitCode]) allResults[unitCode] = {};
                                 allResults[unitCode][mainQuestionKey] = result;

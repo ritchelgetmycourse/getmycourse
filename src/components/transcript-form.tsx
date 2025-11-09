@@ -14,13 +14,20 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { curricula } from "../config/curricula";
 
 const formSchema = z.object({
   studentName: z.string().min(2, "Student name must be at least 2 characters."),
   transcript: z.string().min(50, "Transcript must be at least 50 characters."),
   gender: z.enum(["male", "female"], {
     required_error: "You need to select a gender.",
+  }),
+  curriculumId: z.string({
+    required_error: "Please select a curriculum.",
   }),
 });
 
@@ -47,6 +54,7 @@ export function TranscriptForm() {
       studentName: "",
       transcript: "",
       gender: "male",
+      curriculumId: curricula[0].id, // Default to the first curriculum
     },
   });
 
@@ -99,14 +107,14 @@ export function TranscriptForm() {
     let accumulatedResults: any = {};
 
     try {
-      const genRes = await fetch("/api/generate", {
+      const genRes = await fetch(`/api/generate/${values.curriculumId}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Generation-Id": generationId,
         },
         signal: abortCtrl.signal,
-        body: JSON.stringify({ ...values, generationId }),
+        body: JSON.stringify({ ...values, generationId, curriculumId: values.curriculumId }),
       });
 
       if (!genRes.ok || !genRes.body) {
@@ -260,7 +268,7 @@ export function TranscriptForm() {
     const id = generationIdRef.current;
     try {
       if (id) {
-        await fetch("/api/generate", {
+        await fetch(`/api/generate/${form.getValues().curriculumId}`, {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ generationId: id }),
@@ -297,6 +305,7 @@ export function TranscriptForm() {
           studentName: currentStudentName,
           gender: currentGender,
           answers: reportToUse,
+          curriculumId: form.getValues().curriculumId,
         }),
       });
 
@@ -384,6 +393,31 @@ export function TranscriptForm() {
                 )}
               />
             </div>
+
+            <FormField
+              control={form.control}
+              name="curriculumId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="font-headline">Curriculum</FormLabel>
+                  <Select onValueChange={field.onChange} defaultValue={field.value}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select a curriculum" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {curricula.map((curriculum) => (
+                        <SelectItem key={curriculum.id} value={curriculum.id}>
+                          {curriculum.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
             <FormField
               control={form.control}
