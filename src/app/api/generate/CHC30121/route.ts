@@ -57,7 +57,7 @@ function sendSseMessage(controller: TransformStreamDefaultController, event: str
 export const runtime = "nodejs";
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "models/gemini-flash-latest";
-const CONCURRENCY_LIMIT = 5;
+const CONCURRENCY_LIMIT = 10;
 
 // Utils
 async function readFileContent(filePath: string): Promise<string> {
