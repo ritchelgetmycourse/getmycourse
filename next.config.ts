@@ -30,6 +30,19 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+  experimental: {
+    serverComponentsExternalPackages: [],
+  },
+  webpack: (config) => {
+    config.externals = config.externals || [];
+    config.externals.push({
+      './schemas/CHC30121.json': 'commonjs ./schemas/CHC30121.json',
+      './schemas/CHC33021.json': 'commonjs ./schemas/CHC33021.json',
+      './schemas/CHC43121.json': 'commonjs ./schemas/CHC43121.json',
+      './schemas/CHC50121.json': 'commonjs ./schemas/CHC50121.json',
+    });
+    return config;
+  },
 };
 
 export default nextConfig;
