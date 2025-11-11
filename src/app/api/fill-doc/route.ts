@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
         // Use /tmp for temporary file storage in serverless environments like Vercel
         const tempDir = "/tmp";
         const templatePath = path.join(process.cwd(), selectedCurriculum.templatePath);
-        const schemaJsonText = await fs.readFile(path.join(process.cwd(), selectedCurriculum.schemaPath), 'utf-8');
+        const schemaJsonText = await fs.readFile(selectedCurriculum.schemaPath, 'utf-8');
         const masterSchema = JSON.parse(schemaJsonText);
 
         if (!existsSync(templatePath)) {

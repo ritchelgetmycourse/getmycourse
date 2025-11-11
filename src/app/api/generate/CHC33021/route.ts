@@ -62,13 +62,22 @@ const CONCURRENCY_LIMIT = 5;
 // Utils
 async function readFileContent(filePath: string): Promise<string> {
     try {
-        // First try reading from the root directory (for Vercel)
+        // If path is already absolute, use it directly
+        if (path.isAbsolute(filePath)) {
+            try {
+                return await fs.readFile(filePath, 'utf-8');
+            } catch (absError) {
+                console.error(`Error reading absolute path: ${filePath}`, absError);
+                return "";
+            }
+        }
+        // If path is relative, prepend process.cwd()
         const rootPath = path.join(process.cwd(), filePath);
         try {
             return await fs.readFile(rootPath, 'utf-8');
         } catch (rootError) {
-            // If root path fails, try the absolute path (for local development)
-            return await fs.readFile(filePath, 'utf-8');
+            console.error(`Error reading relative path: ${rootPath}`, rootError);
+            return "";
         }
     } catch (error) {
         console.error(`Error: File not found or could not be read at paths tried:`, error);
