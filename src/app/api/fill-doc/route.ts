@@ -64,13 +64,6 @@ export async function POST(req: NextRequest) {
         const schemaJsonText = await fs.readFile(selectedCurriculum.schemaPath, 'utf-8');
         const masterSchema = JSON.parse(schemaJsonText);
 
-        if (!existsSync(templatePath)) {
-            return NextResponse.json(
-                { ok: false, error: `${selectedCurriculum.templatePath} not found.` },
-                { status: 404 }
-            );
-        }
-
         let dataForDocx: Record<string, any>;
         if (selectedCurriculum.id === "CHC33021") {
             dataForDocx = transformAndFormatAnswersCHC33021(answers, studentName, masterSchema);
@@ -85,7 +78,16 @@ export async function POST(req: NextRequest) {
         }
         console.log(`Data for DOCX template for ${curriculumId}:`, JSON.stringify(dataForDocx, null, 2)); // Log DOCX data
 
-        const templateBuf = await fs.readFile(templatePath);
+        let templateBuf: Buffer;
+        try {
+            templateBuf = await fs.readFile(templatePath);
+        } catch (error: any) {
+            console.error(`Template file not found at: ${templatePath}`, error);
+            return NextResponse.json(
+                { ok: false, error: `Template file "${selectedCurriculum.templatePath}" not found at path: ${templatePath}` },
+                { status: 404 }
+            );
+        }
 
         const zip = new PizZip(templateBuf);
 
