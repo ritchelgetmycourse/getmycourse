@@ -57,14 +57,30 @@ function sendSseMessage(controller: TransformStreamDefaultController, event: str
 export const runtime = "nodejs";
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "models/gemini-flash-latest";
-const CONCURRENCY_LIMIT = 5;
+const CONCURRENCY_LIMIT = 10;
 
 // Utils
 async function readFileContent(filePath: string): Promise<string> {
     try {
-        return await fs.readFile(filePath, 'utf-8');
+        // If path is already absolute, use it directly
+        if (path.isAbsolute(filePath)) {
+            try {
+                return await fs.readFile(filePath, 'utf-8');
+            } catch (absError) {
+                console.error(`Error reading absolute path: ${filePath}`, absError);
+                return "";
+            }
+        }
+        // If path is relative, prepend process.cwd()
+        const rootPath = path.join(process.cwd(), filePath);
+        try {
+            return await fs.readFile(rootPath, 'utf-8');
+        } catch (rootError) {
+            console.error(`Error reading relative path: ${rootPath}`, rootError);
+            return "";
+        }
     } catch (error) {
-        console.error(`Error: File not found or could not be read at path: ${filePath}`, error);
+        console.error(`Error: File not found or could not be read at paths tried:`, error);
         return "";
     }
 }
@@ -111,7 +127,7 @@ export async function POST(req: NextRequest) {
                 const ai = new GoogleGenAI({ apiKey: API_KEY });
                 const model = MODEL_NAME;
 
-                const schemaJsonText = await readFileContent(path.join(process.cwd(), selectedCurriculum.schemaPath));
+                const schemaJsonText = await readFileContent(selectedCurriculum.schemaPath);
                 if (!schemaJsonText) {
                     sendSseMessage(controller as any, "error", { message: `${selectedCurriculum.schemaPath} could not be read.` });
                     controller.close();

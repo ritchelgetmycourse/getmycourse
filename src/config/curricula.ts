@@ -1,3 +1,5 @@
+import path from "path";
+
 export type Curriculum = {
   id: string;
   name: string;
@@ -11,15 +13,15 @@ export const curricula: Curriculum[] = [
   {
     id: "CHC33021",
     name: "CHC33021 Certificate III in Individual Support (Disability)",
-    schemaPath: "schemas/CHC33021.json",
-    templatePath: "templates/blank_form-CHC33021.docx",
+    schemaPath: path.join(process.cwd(), "schemas", "CHC33021.json"),
+    templatePath: path.join(process.cwd(), "templates", "blank_form-CHC33021.docx"),
     logicPath: "src/lib/curriculum-logic/CHC33021",
   },
   {
     id: "CHC30121",
     name: "CHC30121 Certificate III in Early Childhood Education and Care",
-    schemaPath: "schemas/CHC30121.json",
-    templatePath: "templates/blank_form-CHC30121.docx",
+    schemaPath: path.join(process.cwd(), "schemas", "CHC30121.json"),
+    templatePath: path.join(process.cwd(), "templates", "blank_form-CHC30121.docx"),
     logicPath: "src/lib/curriculum-logic/CHC30121",
     systemPromptOverride: `You are a highly experienced and qualified Vocational Education and Training (VET) Assessor specializing in the Australian Early Childhood Education and Care sector. Your area of expertise is the CHC30121 Certificate III in Early Childhood Education and Care qualification. You are professional, meticulous, and skilled at evaluating a student's verbal responses against formal assessment criteria.
 

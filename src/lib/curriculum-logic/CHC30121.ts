@@ -68,7 +68,7 @@ type Answers = Record<string, any>;
 export function transformAndFormatAnswersCHC30121(aiAnswers: Answers, studentName: string, masterSchema: Answers): Record<string, any> {
     const transformedData: Record<string, any> = {};
     const studentNameRegex = /\(student name\)/gi;
-    const maxQuestionNumber = 20; // Assuming no more than 20 questions per unit
+    const maxQuestionNumber = 30;
 
     // Use the master schema as the source of truth for all unit codes
     const allUnitCodes = Object.keys(masterSchema);

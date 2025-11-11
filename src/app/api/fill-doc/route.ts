@@ -60,13 +60,21 @@ export async function POST(req: NextRequest) {
 
         // Use /tmp for temporary file storage in serverless environments like Vercel
         const tempDir = "/tmp";
-        const templatePath = path.join(process.cwd(), selectedCurriculum.templatePath);
-        const schemaJsonText = await fs.readFile(path.join(process.cwd(), selectedCurriculum.schemaPath), 'utf-8');
+        
+        // Handle both absolute and relative template paths
+        let templatePath: string;
+        if (path.isAbsolute(selectedCurriculum.templatePath)) {
+            templatePath = selectedCurriculum.templatePath;
+        } else {
+            templatePath = path.join(process.cwd(), selectedCurriculum.templatePath);
+        }
+        
+        const schemaJsonText = await fs.readFile(selectedCurriculum.schemaPath, 'utf-8');
         const masterSchema = JSON.parse(schemaJsonText);
 
         if (!existsSync(templatePath)) {
             return NextResponse.json(
-                { ok: false, error: `${selectedCurriculum.templatePath} not found.` },
+                { ok: false, error: `${templatePath} not found.` },
                 { status: 404 }
             );
         }
