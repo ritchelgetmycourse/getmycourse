@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { curricula } from "../config/curricula";
+import { calculateTokenCost, formatCostAsUSD } from "@/lib/pricing";
 
 const formSchema = z.object({
   studentName: z.string().min(2, "Student name must be at least 2 characters."),
@@ -42,6 +43,7 @@ export function TranscriptForm() {
   const totalInputTokens = Object.values(tokenUsage).reduce((sum, { inputTokens }) => sum + inputTokens, 0);
   const totalOutputTokens = Object.values(tokenUsage).reduce((sum, { outputTokens }) => sum + outputTokens, 0);
   const totalCombinedTokens = totalInputTokens + totalOutputTokens;
+  const totalCost = calculateTokenCost(totalInputTokens, totalOutputTokens, "models/gemini-flash-latest");
   const { toast } = useToast();
 
   // Refs for cancel support
@@ -502,21 +504,38 @@ export function TranscriptForm() {
         {/* Token Usage Display */}
         {Object.keys(tokenUsage).length > 0 && (
           <div className="mt-8 p-6 bg-gray-100 dark:bg-gray-800 rounded-lg shadow-inner">
-            <h3 className="font-headline text-xl mb-4">Token Usage</h3>
-            <ul className="space-y-2">
-              {Object.entries(tokenUsage).map(([section, { inputTokens, outputTokens }]) => (
+            <h3 className="font-headline text-xl mb-4">Token Usage & Cost</h3>
+            <ul className="space-y-3">
+              {/* {Object.entries(tokenUsage).map(([section, { inputTokens, outputTokens }]) => (
                 <li key={section} className="font-body">
                   {section}: Input: {inputTokens} tokens, Output: {outputTokens} tokens
                 </li>
-              ))}
-              <li className="font-body font-semibold">
-                Total Input Tokens: {totalInputTokens}
+              ))} */}
+              <li className="font-body font-semibold flex justify-between">
+                <span>Total Input Tokens:</span>
+                <span>{totalInputTokens}</span>
               </li>
-              <li className="font-body font-semibold">
-                Total Output Tokens: {totalOutputTokens}
+              <li className="font-body text-sm text-gray-600 dark:text-gray-400 flex justify-between">
+                <span>Input Cost:</span>
+                <span>{formatCostAsUSD(totalCost.inputCost)}</span>
               </li>
-              <li className="font-body font-semibold">
-                Total Combined Tokens: {totalCombinedTokens}
+              
+              <li className="font-body font-semibold flex justify-between mt-4">
+                <span>Total Output Tokens:</span>
+                <span>{totalOutputTokens}</span>
+              </li>
+              <li className="font-body text-sm text-gray-600 dark:text-gray-400 flex justify-between">
+                <span>Output Cost:</span>
+                <span>{formatCostAsUSD(totalCost.outputCost)}</span>
+              </li>
+              
+              <li className="font-body font-semibold flex justify-between mt-4 pt-3 border-t border-gray-300 dark:border-gray-600">
+                <span>Total Combined Tokens:</span>
+                <span>{totalCombinedTokens}</span>
+              </li>
+              <li className="font-body font-bold text-lg flex justify-between text-primary">
+                <span>Total Cost:</span>
+                <span>{formatCostAsUSD(totalCost.totalCost)}</span>
               </li>
             </ul>
           </div>

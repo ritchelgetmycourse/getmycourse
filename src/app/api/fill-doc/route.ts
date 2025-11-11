@@ -7,6 +7,7 @@ import PizZip from "pizzip";
 import { curricula, Curriculum } from '../../../config/curricula';
 import { transformAndFormatAnswersCHC33021 } from '../../../lib/curriculum-logic/CHC33021';
 import { transformAndFormatAnswersCHC30121 } from '../../../lib/curriculum-logic/CHC30121';
+import { fileResolver } from '../../../lib/file-resolver';
 
 export const runtime = "nodejs"; // Required to use 'fs' in Next.js App Router
 
@@ -61,9 +62,26 @@ export async function POST(req: NextRequest) {
         // Use /tmp for temporary file storage in serverless environments like Vercel
         const tempDir = "/tmp";
         const templatePath = path.join(process.cwd(), selectedCurriculum.templatePath);
-        const schemaPath = path.join(process.cwd(), selectedCurriculum.schemaPath);
-        const schemaJsonText = await fs.readFile(schemaPath, 'utf-8');
-        const masterSchema = JSON.parse(schemaJsonText);
+        
+        let schemaJsonText: string;
+        try {
+            schemaJsonText = await fileResolver.readFile(selectedCurriculum.schemaPath);
+        } catch (error) {
+            return NextResponse.json(
+                { ok: false, error: `Failed to read schema file: ${error instanceof Error ? error.message : String(error)}` },
+                { status: 500 }
+            );
+        }
+        
+        let masterSchema: any;
+        try {
+            masterSchema = JSON.parse(schemaJsonText);
+        } catch (error) {
+            return NextResponse.json(
+                { ok: false, error: `Invalid JSON in schema file: ${error instanceof Error ? error.message : String(error)}` },
+                { status: 500 }
+            );
+        }
 
         if (!existsSync(templatePath)) {
             return NextResponse.json(

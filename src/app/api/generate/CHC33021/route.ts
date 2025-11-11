@@ -5,6 +5,7 @@ import path from 'path';
 import pLimit from 'p-limit';
 import { curricula, Curriculum } from '../../../../config/curricula';
 import { createDynamicJsonSchemaCHC33021, systemPromptTextCHC33021 } from '../../../../lib/curriculum-logic/CHC33021';
+import { fileResolver } from '../../../../lib/file-resolver';
 
 // ===== In-memory cancellation store (module-scoped) =====
 type GenRecord = { canceled: boolean; controllers: Set<AbortController> };
@@ -59,23 +60,6 @@ const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = "models/gemini-flash-latest";
 const CONCURRENCY_LIMIT = 5;
 
-// Utils
-async function readFileContent(filePath: string): Promise<string> {
-    try {
-        // First try reading from the root directory (for Vercel)
-        const rootPath = path.join(process.cwd(), filePath);
-        try {
-            return await fs.readFile(rootPath, 'utf-8');
-        } catch (rootError) {
-            // If root path fails, try the absolute path (for local development)
-            return await fs.readFile(filePath, 'utf-8');
-        }
-    } catch (error) {
-        console.error(`Error: File not found or could not be read at paths tried:`, error);
-        return "";
-    }
-}
-
 // ====== POST: start generation (SSE) ======
 export async function POST(req: NextRequest) {
     const curriculumId = "CHC33021"; // Hardcode for this specific route
@@ -118,15 +102,29 @@ export async function POST(req: NextRequest) {
                 const ai = new GoogleGenAI({ apiKey: API_KEY });
                 const model = MODEL_NAME;
 
-                const schemaJsonText = await readFileContent(selectedCurriculum.schemaPath);
-                if (!schemaJsonText) {
-                    sendSseMessage(controller as any, "error", { message: `${selectedCurriculum.schemaPath} could not be read.` });
+                let schemaJsonText: string;
+                try {
+                    schemaJsonText = await fileResolver.readFile(selectedCurriculum.schemaPath);
+                } catch (error) {
+                    sendSseMessage(controller as any, "error", { 
+                        message: `Failed to read schema: ${error instanceof Error ? error.message : String(error)}` 
+                    });
                     controller.close();
                     clearGeneration(generationId);
                     return;
                 }
 
-                const parsedSchemaGuide = JSON.parse(schemaJsonText);
+                let parsedSchemaGuide: any;
+                try {
+                    parsedSchemaGuide = JSON.parse(schemaJsonText);
+                } catch (error) {
+                    sendSseMessage(controller as any, "error", { 
+                        message: `Invalid JSON in schema file: ${error instanceof Error ? error.message : String(error)}` 
+                    });
+                    controller.close();
+                    clearGeneration(generationId);
+                    return;
+                }
 
                 const systemPromptText = selectedCurriculum.systemPromptOverride || systemPromptTextCHC33021(firstName);
 
