@@ -68,6 +68,7 @@ type Answers = Record<string, any>;
 export function transformAndFormatAnswersCHC30121(aiAnswers: Answers, studentName: string, masterSchema: Answers): Record<string, any> {
     const transformedData: Record<string, any> = {};
     const studentNameRegex = /\(student name\)/gi;
+    const firstNameRegex = /{firstName}/gi;
     const maxQuestionNumber = 30;
 
     // Use the master schema as the source of truth for all unit codes
@@ -82,7 +83,9 @@ export function transformAndFormatAnswersCHC30121(aiAnswers: Answers, studentNam
 
             if (aiQuestionData && aiQuestionData.generatedAnswer) {
                 // For template-based curricula, the AI directly provides the generated answer
-                transformedData[placeholderKey] = aiQuestionData.generatedAnswer.replace(studentNameRegex, studentName);
+                transformedData[placeholderKey] = aiQuestionData.generatedAnswer
+                    .replace(studentNameRegex, studentName)
+                    .replace(firstNameRegex, studentName);
             }
         }
     }
