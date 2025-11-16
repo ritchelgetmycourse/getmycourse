@@ -43,7 +43,12 @@ export function TranscriptForm() {
   const totalInputTokens = Object.values(tokenUsage).reduce((sum, { inputTokens }) => sum + inputTokens, 0);
   const totalOutputTokens = Object.values(tokenUsage).reduce((sum, { outputTokens }) => sum + outputTokens, 0);
   const totalCombinedTokens = totalInputTokens + totalOutputTokens;
-  const totalCost = calculateTokenCost(totalInputTokens, totalOutputTokens, "models/gemini-flash-latest");
+
+  // Dynamically determine model name based on selected curriculum
+  const selectedCurriculum = curricula.find(c => c.id === form.watch("curriculumId"));
+  const modelName = selectedCurriculum?.modelName || "models/gemini-flash-latest";
+  const totalCost = calculateTokenCost(totalInputTokens, totalOutputTokens, modelName);
+
   const { toast } = useToast();
 
   // Refs for cancel support

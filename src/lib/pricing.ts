@@ -9,10 +9,10 @@ export const MODEL_PRICING = {
         outputCostPerMillion: 2.5,
         name: "Gemini 2.5 Flash",
     },
-    "models/gemini-pro": {
-        inputCostPerMillion: 0.5,
-        outputCostPerMillion: 1.5,
-        name: "Gemini Pro",
+    "models/gemini-2.5-flash-lite": {
+        inputCostPerMillion: 0.10,
+        outputCostPerMillion: 0.40,
+        name: "Gemini 2.5 Flash-Lite",
     },
     // Add more models as needed
 };

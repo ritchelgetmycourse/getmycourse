@@ -142,9 +142,12 @@ export async function POST(req: NextRequest) {
             err.properties.errors.forEach((e: any, index: number) => {
                 console.error(`Error #${index + 1}:`);
                 console.error(`  Explanation: ${e.explanation}`);
-                console.error(`  Tag: ${e.properties?.id || "unknown"}`);
+                console.error(`  Tag ID: ${e.properties?.id || "unknown"}`);
                 console.error(`  Offending placeholder: ${e.properties?.tag || "N/A"}`);
+                console.error(`  Full error object:`, JSON.stringify(e, null, 2));
             });
+        } else {
+            console.error("No detailed Docxtemplater error properties found. Full error object:", err);
         }
 
         // Return detailed error info in response for debugging
@@ -153,9 +156,10 @@ export async function POST(req: NextRequest) {
                 ok: false,
                 error: err?.message || "Failed to fill doc",
                 details: err?.properties?.errors?.map((e: any) => ({
-                    explanation: e.explanation,
-                    tag: e.properties?.tag || "N/A",
-                })) || [],
+                    explanation: e.explanation || "No explanation available",
+                    tag: e.properties?.tag || e.properties?.id || "Unknown tag",
+                    full: e,
+                })) || [{ message: "No detailed error info available", fullError: err }],
             },
             { status: 500 }
         );
