@@ -7,6 +7,7 @@ export type Curriculum = {
   templatePath: string;
   logicPath: string; // Path to the curriculum-specific logic module
   systemPromptOverride?: string;
+  modelName?: string; // Added to support dynamic model pricing
 };
 
 export const curricula: Curriculum[] = [
