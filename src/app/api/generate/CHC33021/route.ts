@@ -235,14 +235,48 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                 }
 
                                 const aiClient = ai; // alias
-                                // Many SDK versions take optional httpOptions with AbortSignal; keep as best-effort.
-                                const responseStream: any = await aiClient.models.generateContentStream({
-                                    model,
-                                    config,
-                                    contents,
-                                    // @ts-ignore
-                                    httpOptions: { signal: callAbort.signal },
-                                });
+
+                                // --- Retry + Timeout Wrapper ---
+                                async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+                                    return Promise.race([
+                                        promise,
+                                        new Promise<T>((_, reject) => setTimeout(() => {
+                                            onTimeout();
+                                            reject(new Error(`Timeout after ${ms}ms`));
+                                        }, ms))
+                                    ]);
+                                }
+
+                                async function retry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
+                                    for (let attempt = 1; attempt <= retries; attempt++) {
+                                        try {
+                                            if (attempt > 1) {
+                                                sendSseMessage(controller as any, "retry", { unitCode, mainQuestionKey, attempt });
+                                            }
+                                            return await fn();
+                                        } catch (err) {
+                                            if (attempt === retries) throw err;
+                                            console.warn(`Retry ${attempt} failed for ${unitCode}:${mainQuestionKey}, retrying in ${delay}ms...`);
+                                            await new Promise(res => setTimeout(res, delay));
+                                            delay *= 2;
+                                        }
+                                    }
+                                    throw new Error("Max retries reached");
+                                }
+
+                                const responseStream: any = await retry(() =>
+                                    withTimeout(
+                                        aiClient.models.generateContentStream({
+                                            model,
+                                            config,
+                                            contents,
+                                            // @ts-ignore
+                                            httpOptions: { signal: callAbort.signal },
+                                        }),
+                                        120000, // 2-minute timeout per question
+                                        () => callAbort.abort()
+                                    )
+                                );
 
                                 let responseContent = '';
 
