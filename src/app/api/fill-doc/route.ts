@@ -135,11 +135,28 @@ export async function POST(req: NextRequest) {
         });
     } catch (err: any) {
         console.error("Doc Gen Error:", err);
+
+        // Enhanced logging for Docxtemplater errors
         if (err.properties && err.properties.errors) {
-            console.error("Docxtemplater errors:", err.properties.errors);
+            console.error("Docxtemplater detailed errors:");
+            err.properties.errors.forEach((e: any, index: number) => {
+                console.error(`Error #${index + 1}:`);
+                console.error(`  Explanation: ${e.explanation}`);
+                console.error(`  Tag: ${e.properties?.id || "unknown"}`);
+                console.error(`  Offending placeholder: ${e.properties?.tag || "N/A"}`);
+            });
         }
+
+        // Return detailed error info in response for debugging
         return NextResponse.json(
-            { ok: false, error: err?.message || "Failed to fill doc" },
+            {
+                ok: false,
+                error: err?.message || "Failed to fill doc",
+                details: err?.properties?.errors?.map((e: any) => ({
+                    explanation: e.explanation,
+                    tag: e.properties?.tag || "N/A",
+                })) || [],
+            },
             { status: 500 }
         );
     }
