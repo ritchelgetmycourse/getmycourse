@@ -44,11 +44,6 @@ export function TranscriptForm() {
   const totalOutputTokens = Object.values(tokenUsage).reduce((sum, { outputTokens }) => sum + outputTokens, 0);
   const totalCombinedTokens = totalInputTokens + totalOutputTokens;
 
-  // Dynamically determine model name based on selected curriculum
-  const selectedCurriculum = curricula.find(c => c.id === form.watch("curriculumId"));
-  const modelName = selectedCurriculum?.modelName || "models/gemini-flash-latest";
-  const totalCost = calculateTokenCost(totalInputTokens, totalOutputTokens, modelName);
-
   const { toast } = useToast();
 
   // Refs for cancel support
@@ -64,6 +59,11 @@ export function TranscriptForm() {
       curriculumId: curricula[0].id, // Default to the first curriculum
     },
   });
+
+  // Dynamically determine model name based on selected curriculum
+  const selectedCurriculum = curricula.find(c => c.id === form.watch("curriculumId"));
+  const modelName = selectedCurriculum?.modelName || "models/gemini-flash-latest";
+  const totalCost = calculateTokenCost(totalInputTokens, totalOutputTokens, modelName);
 
   // Helper function to trigger the download from a base64 string
   function downloadBase64Docx(base64: string, filename: string) {
