@@ -56,7 +56,7 @@ function sendSseMessage(controller: TransformStreamDefaultController, event: str
 // --- Configuration ---
 export const runtime = "nodejs";
 const API_KEY = process.env.GEMINI_API_KEY || '';
-const MODEL_NAME = "models/gemini-2.5-flash-lite";
+const MODEL_NAME = "models/gemini-flash-latest";
 const CONCURRENCY_LIMIT = 10;
 
 // Utils
