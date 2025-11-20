@@ -258,7 +258,7 @@ Your response MUST be a single, valid JSON object that strictly adheres to the f
                                             if (attempt === retries) throw err;
                                             console.warn(`Retry ${attempt} failed for ${unitCode}:${mainQuestionKey}, retrying in ${delay}ms...`);
                                             await new Promise(res => setTimeout(res, delay));
-                                            delay *= 2;
+                                            // Fixed delay of 2 seconds (no exponential backoff)
                                         }
                                     }
                                     throw new Error("Max retries reached");

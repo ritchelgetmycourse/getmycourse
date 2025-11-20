@@ -514,11 +514,6 @@ export function TranscriptForm() {
               <strong>Model Used:</strong> {modelName}
             </p>
             <ul className="space-y-3">
-              {/* {Object.entries(tokenUsage).map(([section, { inputTokens, outputTokens }]) => (
-                <li key={section} className="font-body">
-                  {section}: Input: {inputTokens} tokens, Output: {outputTokens} tokens
-                </li>
-              ))} */}
               <li className="font-body font-semibold flex justify-between">
                 <span>Total Input Tokens:</span>
                 <span>{totalInputTokens}</span>
@@ -546,6 +541,44 @@ export function TranscriptForm() {
                 <span>{formatCostAsUSD(totalCost.totalCost)}</span>
               </li>
             </ul>
+          </div>
+        )}
+
+        {/* Failed Questions Section */}
+        {Object.keys(processingStatus).some(unitCode =>
+          Object.values(processingStatus[unitCode]).some(q => q.status === "error")
+        ) && (
+          <div className="mt-8 p-6 bg-red-50 dark:bg-gray-900 rounded-lg shadow-inner border border-red-300 dark:border-red-700">
+            <h3 className="font-headline text-xl mb-4 text-red-600 dark:text-red-400">Failed Questions</h3>
+            {Object.entries(processingStatus).map(([unitCode, questions]) => {
+              const failedQuestions = Object.entries(questions).filter(
+                ([, statusData]) => statusData.status === "error"
+              );
+              if (failedQuestions.length === 0) return null;
+              return (
+                <div key={unitCode} className="mb-6">
+                  <h4 className="font-semibold text-lg mb-3">{unitCode}</h4>
+                  <ul className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {failedQuestions.map(([questionKey, statusData]) => (
+                      <li
+                        key={questionKey}
+                        className="flex items-start space-x-3 p-3 border rounded-md bg-white dark:bg-gray-800 border-red-200 dark:border-red-600 shadow-sm hover:shadow-md transition-shadow"
+                      >
+                        <XCircle className="h-5 w-5 text-red-500 mt-1 flex-shrink-0" />
+                        <div className="flex flex-col">
+                          <span className="font-body text-sm font-semibold text-gray-800 dark:text-gray-100">
+                            Question {questionKey}
+                          </span>
+                          <span className="font-body text-sm text-red-600 dark:text-red-400">
+                            {statusData.message || "Unknown error"}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
           </div>
         )}
 
